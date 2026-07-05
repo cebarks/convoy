@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net472</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <DeployAfterBuild>true</DeployAfterBuild>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+        <DefineConstants>$(DefineConstants);DEBUG;TRACE</DefineConstants>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.4"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Reference Include="System.Net.Http"/>
+        <Reference Include="BepInEx">
+            <HintPath>$(TarkovBepInExCoreDir)BepInEx.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine">
+            <HintPath>$(TarkovManagedDir)UnityEngine.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.CoreModule">
+            <HintPath>$(TarkovManagedDir)UnityEngine.CoreModule.dll</HintPath>
+        </Reference>
+    </ItemGroup>
+
+    <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(DeployAfterBuild)' == 'true'">
+        <PropertyGroup>
+            <BuildOutputDir>$(MSBuildProjectDirectory)\..\Build\BepInEx\plugins\Convoy</BuildOutputDir>
+        </PropertyGroup>
+        <MakeDir Directories="$(BuildOutputDir)"/>
+        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(BuildOutputDir)"/>
+        <Message Text="Build output copied to: $(BuildOutputDir)" Importance="high"/>
+    </Target>
+
+</Project>

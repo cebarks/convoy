@@ -1,0 +1,21 @@
+## .NET / C#
+bin/
+obj/
+Build/
+*.user
+*.suo
+*.cache
+*.log
+*.vs/
+
+## IDE
+.idea/
+.vs/
+*.sln.DotSettings.user
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Build output
+*.nupkg
