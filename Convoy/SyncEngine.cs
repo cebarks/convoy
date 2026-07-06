@@ -166,29 +166,32 @@ namespace Convoy
             if (toDownload.Count > 0)
             {
                 var zipBytes = DownloadMods(serverUrl, toDownload);
-                var extractedFiles = ExtractZip(zipBytes);
-
-                var expectedChecksums = wantedMods.Values
-                    .Where(m => toDownload.Contains(m.ForgeId))
-                    .SelectMany(m => m.FileChecksums)
-                    .ToDictionary(kv => kv.Key, kv => kv.Value);
-
-                var unverified = extractedFiles.Where(p => !expectedChecksums.ContainsKey(p)).ToList();
-                if (unverified.Count > 0)
-                    _log.LogWarning($"ZIP contained {unverified.Count} file(s) not in catalog checksums");
-
-                // ponytail: verify-then-delete, not extract-to-temp. On failure state isn't
-                // updated so next launch re-syncs. Atomic extract if integrity matters more.
-                if (!VerifyHashes(extractedFiles, expectedChecksums))
+                var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
+                try
                 {
-                    foreach (var path in extractedFiles)
+                    var extractedFiles = ExtractZip(zipBytes, stagingDir);
+
+                    var expectedChecksums = wantedMods.Values
+                        .Where(m => toDownload.Contains(m.ForgeId))
+                        .SelectMany(m => m.FileChecksums)
+                        .ToDictionary(kv => kv.Key, kv => kv.Value);
+
+                    var unverified = extractedFiles.Where(p => !expectedChecksums.ContainsKey(p)).ToList();
+                    if (unverified.Count > 0)
+                        _log.LogWarning($"ZIP contained {unverified.Count} file(s) not in catalog checksums");
+
+                    if (!VerifyHashes(extractedFiles, expectedChecksums, stagingDir))
                     {
-                        var fullPath = ResolvePath(path);
-                        if (File.Exists(fullPath))
-                            File.Delete(fullPath);
+                        _log.LogError("Hash verification failed, aborting sync");
+                        return SyncResult.Failed;
                     }
-                    _log.LogError("Hash verification failed, aborting sync");
-                    return SyncResult.Failed;
+
+                    MoveToGameRoot(extractedFiles, stagingDir);
+                }
+                finally
+                {
+                    if (Directory.Exists(stagingDir))
+                        Directory.Delete(stagingDir, true);
                 }
             }
 
@@ -282,10 +285,10 @@ namespace Convoy
             }
         }
 
-        private List<string> ExtractZip(byte[] zipBytes)
+        private List<string> ExtractZip(byte[] zipBytes, string targetDir)
         {
-            var normalizedRoot = Path.GetFullPath(_gameRoot).TrimEnd(Path.DirectorySeparatorChar)
-                                 + Path.DirectorySeparatorChar;
+            var normalizedTarget = Path.GetFullPath(targetDir).TrimEnd(Path.DirectorySeparatorChar)
+                                   + Path.DirectorySeparatorChar;
             var extracted = new List<string>();
 
             using (var ms = new MemoryStream(zipBytes))
@@ -295,9 +298,10 @@ namespace Convoy
                 {
                     if (string.IsNullOrEmpty(entry.Name)) continue;
 
-                    var destPath = Path.GetFullPath(ResolvePath(entry.FullName));
-                    if (!destPath.StartsWith(normalizedRoot))
-                        throw new InvalidOperationException($"ZIP path escapes game root: {entry.FullName}");
+                    var destPath = Path.GetFullPath(Path.Combine(targetDir,
+                        entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
+                    if (!destPath.StartsWith(normalizedTarget))
+                        throw new InvalidOperationException($"ZIP path escapes target: {entry.FullName}");
 
                     Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
                     using (var src = entry.Open())
@@ -311,14 +315,15 @@ namespace Convoy
             return extracted;
         }
 
-        private bool VerifyHashes(List<string> extractedPaths, Dictionary<string, string> expected)
+        private bool VerifyHashes(List<string> extractedPaths, Dictionary<string, string> expected, string baseDir)
         {
             using (var sha = SHA256.Create())
             {
                 foreach (var relPath in extractedPaths)
                 {
                     if (!expected.TryGetValue(relPath, out var want)) continue;
-                    using (var stream = File.OpenRead(ResolvePath(relPath)))
+                    var fullPath = Path.Combine(baseDir, relPath.Replace('/', Path.DirectorySeparatorChar));
+                    using (var stream = File.OpenRead(fullPath))
                     {
                         var got = BitConverter.ToString(sha.ComputeHash(stream))
                             .Replace("-", "").ToLowerInvariant();
@@ -331,6 +336,17 @@ namespace Convoy
                 }
             }
             return true;
+        }
+
+        private void MoveToGameRoot(List<string> files, string stagingDir)
+        {
+            foreach (var relPath in files)
+            {
+                var src = Path.Combine(stagingDir, relPath.Replace('/', Path.DirectorySeparatorChar));
+                var dst = ResolvePath(relPath);
+                Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+                File.Copy(src, dst, true);
+            }
         }
 
         private string ResolvePath(string relativePath) =>
