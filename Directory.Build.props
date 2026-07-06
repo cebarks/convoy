@@ -1,5 +1,6 @@
 <Project>
     <PropertyGroup>
+        <TarkovDir Condition=" '$(TarkovDir)' == '' AND '$(TARKOV_DIR)' != '' ">$(TARKOV_DIR)</TarkovDir>
         <TarkovDir Condition=" '$(TarkovDir)' == '' ">$(MSBuildThisFileDirectory)..\..\</TarkovDir>
         <TarkovManagedDir Condition="'$(TarkovManagedDir)' == ''">$(TarkovDir)EscapeFromTarkov_Data\Managed\</TarkovManagedDir>
         <TarkovBepInExCoreDir Condition="'$(TarkovBepInExCoreDir)' == ''">$(TarkovDir)BepInEx\core\</TarkovBepInExCoreDir>
