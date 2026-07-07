@@ -2,7 +2,7 @@ using BepInEx;
 
 namespace Convoy
 {
-    [BepInPlugin("com.cebarks.convoy", "Convoy", VersionInfo.Version)]
+    [BepInPlugin("io.cebarks.convoy", "Convoy", VersionInfo.Version)]
     public class ConvoyPlugin : BaseUnityPlugin
     {
         private void Awake()
