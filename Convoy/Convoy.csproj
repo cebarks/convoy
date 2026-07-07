@@ -27,6 +27,21 @@
         </Reference>
     </ItemGroup>
 
+    <Target Name="GitVersion" BeforeTargets="CoreCompile">
+        <Exec Command="git describe --tags --always 2>/dev/null || echo 0.0.0-dev"
+              ConsoleToMsBuild="true" StandardOutputImportance="low">
+            <Output TaskParameter="ConsoleOutput" PropertyName="GitTag"/>
+        </Exec>
+        <PropertyGroup>
+            <GitVersion>$([System.Text.RegularExpressions.Regex]::Replace('$(GitTag)', '^v', ''))</GitVersion>
+        </PropertyGroup>
+        <WriteLinesToFile File="$(IntermediateOutputPath)GitVersion.g.cs" Overwrite="true"
+                         Lines="namespace Convoy { internal static partial class VersionInfo { internal const string Version = &quot;$(GitVersion)&quot;%3B } }"/>
+        <ItemGroup>
+            <Compile Include="$(IntermediateOutputPath)GitVersion.g.cs"/>
+        </ItemGroup>
+    </Target>
+
     <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(DeployAfterBuild)' == 'true'">
         <PropertyGroup>
             <BuildOutputDir>$(MSBuildProjectDirectory)\..\Build\BepInEx\plugins\Convoy</BuildOutputDir>
