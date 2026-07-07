@@ -16,8 +16,8 @@ namespace Convoy
 
     public class ModState
     {
-        [JsonProperty("forge_id")]
-        public int ForgeId { get; set; }
+        [JsonProperty("id")]
+        public int Id { get; set; }
 
         [JsonProperty("version")]
         public string Version { get; set; } = "";

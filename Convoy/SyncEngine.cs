@@ -16,8 +16,11 @@ namespace Convoy
 
     public class CatalogMod
     {
+        [JsonProperty("id")]
+        public int Id { get; set; }
+
         [JsonProperty("forge_id")]
-        public int ForgeId { get; set; }
+        public int? ForgeId { get; set; }
 
         [JsonProperty("name")]
         public string Name { get; set; } = "";
@@ -94,8 +97,10 @@ namespace Convoy
 
         private SyncResult RunSync()
         {
+            CleanPendingDeletes();
+
             var state = ConvoyState.Load();
-            var serverUrl = _config.ServerUrl.Value.TrimEnd('/');
+            var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
 
             var (catalog, newEtag) = FetchCatalog(serverUrl, state.LastCatalogEtag);
             if (catalog == null)
@@ -112,10 +117,10 @@ namespace Convoy
                 if (group.Tier != "required" && !_config.IsGroupEnabled(group.Slug))
                     continue;
                 foreach (var mod in group.Mods)
-                    wantedMods[mod.ForgeId] = mod;
+                    wantedMods[mod.Id] = mod;
             }
 
-            var currentMods = state.Mods.ToDictionary(m => m.ForgeId);
+            var currentMods = state.Mods.ToDictionary(m => m.Id);
 
             var toDownload = new List<int>();
             foreach (var kvp in wantedMods)
@@ -145,15 +150,15 @@ namespace Convoy
             {
                 var names = toRemove
                     .Where(id => currentMods.ContainsKey(id))
-                    .Select(id => currentMods[id].ForgeId.ToString());
+                    .Select(id => currentMods[id].Id.ToString());
                 _log.LogInfo($"Removing: {string.Join(", ", names)}");
             }
 
             // Clean up files from old versions before downloading new ones
-            foreach (var forgeId in toDownload)
+            foreach (var modId in toDownload)
             {
-                if (!currentMods.TryGetValue(forgeId, out var oldMod)) continue;
-                var newFiles = new HashSet<string>(wantedMods[forgeId].FileChecksums.Keys);
+                if (!currentMods.TryGetValue(modId, out var oldMod)) continue;
+                var newFiles = new HashSet<string>(wantedMods[modId].FileChecksums.Keys);
                 foreach (var file in oldMod.Files.Where(f => !newFiles.Contains(f.Path)))
                 {
                     if (exclusions.Contains(file.Path)) continue;
@@ -172,7 +177,7 @@ namespace Convoy
                     var extractedFiles = ExtractZip(zipBytes, stagingDir);
 
                     var expectedChecksums = wantedMods.Values
-                        .Where(m => toDownload.Contains(m.ForgeId))
+                        .Where(m => toDownload.Contains(m.Id))
                         .SelectMany(m => m.FileChecksums)
                         .ToDictionary(kv => kv.Key, kv => kv.Value);
 
@@ -195,9 +200,9 @@ namespace Convoy
                 }
             }
 
-            foreach (var forgeId in toRemove)
+            foreach (var modId in toRemove)
             {
-                if (!currentMods.TryGetValue(forgeId, out var mod)) continue;
+                if (!currentMods.TryGetValue(modId, out var mod)) continue;
                 foreach (var file in mod.Files)
                 {
                     if (exclusions.Contains(file.Path)) continue;
@@ -217,7 +222,7 @@ namespace Convoy
             state.LastCatalogEtag = newEtag;
             state.Mods = wantedMods.Values.Select(m => new ModState
             {
-                ForgeId = m.ForgeId,
+                Id = m.Id,
                 Version = m.Version,
                 Files = m.FileChecksums.Select(kv => new ModFileState
                 {
@@ -262,7 +267,7 @@ namespace Convoy
             }
         }
 
-        private byte[] DownloadMods(string serverUrl, List<int> forgeIds)
+        private byte[] DownloadMods(string serverUrl, List<int> modIds)
         {
             var request = WebRequest.CreateHttp($"{serverUrl}/quma/convoy/download");
             request.Method = "POST";
@@ -270,7 +275,7 @@ namespace Convoy
             request.Timeout = DownloadTimeoutMs;
 
             var body = Encoding.UTF8.GetBytes(
-                JsonConvert.SerializeObject(new { mods = forgeIds }));
+                JsonConvert.SerializeObject(new { mods = modIds }));
             request.ContentLength = body.Length;
 
             using (var s = request.GetRequestStream())
@@ -345,7 +350,32 @@ namespace Convoy
                 var src = Path.Combine(stagingDir, relPath.Replace('/', Path.DirectorySeparatorChar));
                 var dst = ResolvePath(relPath);
                 Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
-                File.Copy(src, dst, true);
+
+                if (File.Exists(dst))
+                {
+                    // ponytail: loaded DLLs can be renamed but not overwritten on Windows
+                    var pending = dst + ".convoy-old";
+                    try { File.Delete(pending); } catch { }
+                    File.Move(dst, pending);
+                }
+
+                File.Copy(src, dst);
+            }
+        }
+
+        private void CleanPendingDeletes()
+        {
+            try
+            {
+                foreach (var old in Directory.EnumerateFiles(_gameRoot, "*.convoy-old", SearchOption.AllDirectories))
+                {
+                    File.Delete(old);
+                    _log.LogDebug($"Cleaned up {old}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning($"Failed to clean pending deletes: {ex.Message}");
             }
         }
 

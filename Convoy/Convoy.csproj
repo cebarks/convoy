@@ -22,8 +22,17 @@
         <Reference Include="UnityEngine.CoreModule">
             <HintPath>$(TarkovManagedDir)UnityEngine.CoreModule.dll</HintPath>
         </Reference>
+        <Reference Include="UnityEngine.IMGUIModule">
+            <HintPath>$(TarkovManagedDir)UnityEngine.IMGUIModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.TextRenderingModule">
+            <HintPath>$(TarkovManagedDir)UnityEngine.TextRenderingModule.dll</HintPath>
+        </Reference>
         <Reference Include="Newtonsoft.Json">
             <HintPath>$(TarkovDir)Newtonsoft.Json.dll</HintPath>
+        </Reference>
+        <Reference Include="spt-common">
+            <HintPath>$(TarkovPluginsSPTDir)spt-common.dll</HintPath>
         </Reference>
     </ItemGroup>
 
@@ -33,7 +42,9 @@
             <Output TaskParameter="ConsoleOutput" PropertyName="GitTag"/>
         </Exec>
         <PropertyGroup>
-            <GitVersion>$([System.Text.RegularExpressions.Regex]::Replace('$(GitTag)', '^v', ''))</GitVersion>
+            <GitVersionRaw>$([System.Text.RegularExpressions.Regex]::Match($([System.Text.RegularExpressions.Regex]::Replace('$(GitTag)', '^v', '')), '^\d+\.\d+\.\d+').ToString())</GitVersionRaw>
+            <GitVersion Condition="'$(GitVersionRaw)' != ''">$(GitVersionRaw)</GitVersion>
+            <GitVersion Condition="'$(GitVersionRaw)' == ''">0.0.0</GitVersion>
         </PropertyGroup>
         <WriteLinesToFile File="$(IntermediateOutputPath)GitVersion.g.cs" Overwrite="true"
                          Lines="namespace Convoy { internal static partial class VersionInfo { internal const string Version = &quot;$(GitVersion)&quot;%3B } }"/>

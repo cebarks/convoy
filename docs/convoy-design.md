@@ -47,6 +47,7 @@ Builds a JSON catalog of all synced mods from DB state. Cached on disk using the
       "tier": "required",
       "mods": [
         {
+          "id": 42,
           "forge_id": 1234,
           "name": "SAIN",
           "version": "3.2.1",
@@ -70,7 +71,7 @@ Builds a JSON catalog of all synced mods from DB state. Cached on disk using the
 
 #### Download (`download.rs`)
 
-Handles batched mod archive downloads. Client sends the list of Forge IDs it needs, server builds a ZIP on the fly from the installed files on disk (original archives are not retained after extraction) and streams the response. The ZIP is structured so each mod's files are at their correct relative paths (e.g., `BepInEx/plugins/SAIN/SAIN.dll`).
+Handles batched mod archive downloads. Client sends the list of mod DB IDs it needs, server builds a ZIP on the fly from the installed files on disk (original archives are not retained after extraction) and streams the response. The ZIP is structured so each mod's files are at their correct relative paths (e.g., `BepInEx/plugins/SAIN/SAIN.dll`).
 
 #### Groups (`groups.rs`)
 
@@ -158,7 +159,7 @@ Same pattern as `ModZipCache`: an `invalidate()` method triggers a background re
   "last_catalog_etag": "\"a1b2c3\"",
   "mods": [
     {
-      "forge_id": 1234,
+      "id": 42,
       "version": "3.2.1",
       "files": [
         {"path": "BepInEx/plugins/SAIN/SAIN.dll", "hash": "def456..."}
@@ -183,7 +184,7 @@ Same pattern as `ModZipCache`: an `invalidate()` method triggers a background re
    - Optional group toggled off, mod installed → remove
 5. If no changes → done, game continues
 6. Log summary to BepInEx console
-7. `POST /quma/convoy/download` with `{"mods": [1234, 5678]}` (Forge IDs needed)
+7. `POST /quma/convoy/download` with `{"mods": [42, 43]}` (mod DB IDs to download)
 8. Extract archives, verify file hashes against catalog's `file_checksums`
 9. Delete files for removed mods
 10. Update `state.json` with new ETag and mod state

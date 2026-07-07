@@ -6,8 +6,6 @@ namespace Convoy
 {
     public class ConvoyConfig
     {
-        public ConfigEntry<string> ServerUrl { get; }
-
         private readonly ConfigFile _config;
         private readonly Dictionary<string, ConfigEntry<bool>> _groupToggles =
             new Dictionary<string, ConfigEntry<bool>>();
@@ -15,8 +13,6 @@ namespace Convoy
         public ConvoyConfig(ConfigFile config)
         {
             _config = config;
-            ServerUrl = config.Bind("General", "ServerUrl", "http://localhost:9190",
-                "Quartermaster server URL for mod sync");
         }
 
         public void RegisterOptionalGroups(List<CatalogGroup> groups)
