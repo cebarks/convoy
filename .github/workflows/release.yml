@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - run: dotnet build Convoy/Convoy.csproj -c Release -p:UseStubs=true -p:DeployAfterBuild=false
+
+      - run: |
+          mkdir -p staging/BepInEx/plugins/Convoy
+          cp Convoy/bin/Release/Convoy.dll staging/BepInEx/plugins/Convoy/
+          cd staging && zip -r ../Convoy.zip BepInEx/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: Convoy.zip
+          generate_release_notes: true
