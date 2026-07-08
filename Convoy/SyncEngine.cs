@@ -81,28 +81,33 @@ namespace Convoy
             _gameRoot = Paths.GameRootPath;
         }
 
-        public SyncResult Run()
+        public SyncResult Run(SyncProgress? progress = null)
         {
             try
             {
-                return RunSync();
+                var result = RunSync(progress);
+                progress?.Complete(result);
+                return result;
             }
             catch (Exception ex)
             {
                 _log.LogError($"Convoy sync failed: {ex.Message}");
                 _log.LogDebug(ex);
                 SendReport("failed", null, ex.Message);
+                progress?.Complete(SyncResult.Failed, ex.Message);
                 return SyncResult.Failed;
             }
         }
 
-        private SyncResult RunSync()
+        private SyncResult RunSync(SyncProgress? progress)
         {
+            progress?.SetPhase("Cleaning up...");
             CleanPendingDeletes();
 
             var state = ConvoyState.Load();
             var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
 
+            progress?.SetPhase("Fetching catalog...");
             var (catalog, newEtag) = FetchCatalog(serverUrl, state.LastCatalogEtag);
             if (catalog == null)
             {
@@ -157,7 +162,6 @@ namespace Convoy
                 _log.LogInfo($"Removing: {string.Join(", ", names)}");
             }
 
-            // Clean up files from old versions before downloading new ones
             foreach (var modId in toDownload)
             {
                 if (!currentMods.TryGetValue(modId, out var oldMod)) continue;
@@ -173,7 +177,10 @@ namespace Convoy
 
             if (toDownload.Count > 0)
             {
-                var zipBytes = DownloadMods(serverUrl, toDownload);
+                progress?.SetPhase($"Downloading {toDownload.Count} mod{(toDownload.Count == 1 ? "" : "s")}...");
+                var zipBytes = DownloadMods(serverUrl, toDownload, progress);
+
+                progress?.SetPhase("Extracting...");
                 var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
                 try
                 {
@@ -188,6 +195,7 @@ namespace Convoy
                     if (unverified.Count > 0)
                         _log.LogWarning($"ZIP contained {unverified.Count} file(s) not in catalog checksums");
 
+                    progress?.SetPhase("Verifying hashes...");
                     if (!VerifyHashes(extractedFiles, expectedChecksums, stagingDir))
                     {
                         _log.LogError("Hash verification failed, aborting sync");
@@ -195,6 +203,7 @@ namespace Convoy
                         return SyncResult.Failed;
                     }
 
+                    progress?.SetPhase("Installing files...");
                     MoveToGameRoot(extractedFiles, stagingDir);
                 }
                 finally
@@ -204,22 +213,26 @@ namespace Convoy
                 }
             }
 
-            foreach (var modId in toRemove)
+            if (toRemove.Count > 0)
             {
-                if (!currentMods.TryGetValue(modId, out var mod)) continue;
-                foreach (var file in mod.Files)
+                progress?.SetPhase("Removing old mods...");
+                foreach (var modId in toRemove)
                 {
-                    if (exclusions.Contains(file.Path)) continue;
-                    var fullPath = ResolvePath(file.Path);
-                    if (File.Exists(fullPath))
+                    if (!currentMods.TryGetValue(modId, out var mod)) continue;
+                    foreach (var file in mod.Files)
                     {
-                        File.Delete(fullPath);
-                        _log.LogInfo($"Removed: {file.Path}");
+                        if (exclusions.Contains(file.Path)) continue;
+                        var fullPath = ResolvePath(file.Path);
+                        if (File.Exists(fullPath))
+                        {
+                            File.Delete(fullPath);
+                            _log.LogInfo($"Removed: {file.Path}");
+                        }
                     }
+                    CleanEmptyDirs(mod.Files
+                        .Where(f => !exclusions.Contains(f.Path))
+                        .Select(f => ResolvePath(f.Path)));
                 }
-                CleanEmptyDirs(mod.Files
-                    .Where(f => !exclusions.Contains(f.Path))
-                    .Select(f => ResolvePath(f.Path)));
             }
 
             state.ServerUrl = serverUrl;
@@ -242,7 +255,9 @@ namespace Convoy
         }
 
         private const int CatalogTimeoutMs = 15_000;
-        private const int DownloadTimeoutMs = 120_000;
+        private const int DownloadConnectTimeoutMs = 30_000;
+        private const int MinBitrateBytes = 10 * 1024; // 10 KB/s
+        private const int StallWindowSeconds = 15;
 
         private (Catalog?, string?) FetchCatalog(string serverUrl, string? lastEtag)
         {
@@ -272,12 +287,13 @@ namespace Convoy
             }
         }
 
-        private byte[] DownloadMods(string serverUrl, List<int> modIds)
+        private byte[] DownloadMods(string serverUrl, List<int> modIds, SyncProgress? progress = null)
         {
             var request = WebRequest.CreateHttp($"{serverUrl}/quma/convoy/download");
             request.Method = "POST";
             request.ContentType = "application/json";
-            request.Timeout = DownloadTimeoutMs;
+            request.Timeout = DownloadConnectTimeoutMs;
+            request.ReadWriteTimeout = DownloadConnectTimeoutMs;
 
             var body = Encoding.UTF8.GetBytes(
                 JsonConvert.SerializeObject(new { mods = modIds }));
@@ -288,10 +304,53 @@ namespace Convoy
 
             using (var response = request.GetResponse())
             using (var stream = response.GetResponseStream()!)
-            using (var ms = new MemoryStream())
             {
-                stream.CopyTo(ms);
-                return ms.ToArray();
+                var totalBytes = response.ContentLength;
+                if (progress != null && totalBytes > 0)
+                    progress.SetDownloadProgress(0, totalBytes);
+
+                var capacity = totalBytes > 0 && totalBytes <= int.MaxValue ? (int)totalBytes : 4096;
+                using (var ms = new MemoryStream(capacity))
+                {
+                    var buffer = new byte[8192];
+                    long received = 0;
+                    var samples = new List<(double time, long bytes)>();
+                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                    double lastSampleTime = 0;
+
+                    int bytesRead;
+                    while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        ms.Write(buffer, 0, bytesRead);
+                        received += bytesRead;
+                        progress?.SetDownloadProgress(received, totalBytes);
+
+                        var elapsed = stopwatch.Elapsed.TotalSeconds;
+                        if (elapsed - lastSampleTime >= 1.0)
+                        {
+                            samples.Add((elapsed, received));
+                            lastSampleTime = elapsed;
+
+                            while (samples.Count > 1 && elapsed - samples[0].time > StallWindowSeconds)
+                                samples.RemoveAt(0);
+
+                            if (samples.Count >= 2)
+                            {
+                                var window = samples[samples.Count - 1].time - samples[0].time;
+                                if (window >= StallWindowSeconds)
+                                {
+                                    var bytesInWindow = samples[samples.Count - 1].bytes - samples[0].bytes;
+                                    var bitrate = bytesInWindow / window;
+                                    if (bitrate < MinBitrateBytes)
+                                        throw new TimeoutException(
+                                            $"Download stalled: {bitrate / 1024:F1} KB/s avg over {StallWindowSeconds}s (minimum {MinBitrateBytes / 1024} KB/s)");
+                                }
+                            }
+                        }
+                    }
+
+                    return ms.ToArray();
+                }
             }
         }
 
