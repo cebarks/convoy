@@ -91,6 +91,7 @@ namespace Convoy
             {
                 _log.LogError($"Convoy sync failed: {ex.Message}");
                 _log.LogDebug(ex);
+                SendReport("failed", null, ex.Message);
                 return SyncResult.Failed;
             }
         }
@@ -106,6 +107,7 @@ namespace Convoy
             if (catalog == null)
             {
                 _log.LogInfo("Catalog unchanged, skipping sync");
+                SendReport("up_to_date", state.Mods, null);
                 return SyncResult.UpToDate;
             }
 
@@ -136,6 +138,7 @@ namespace Convoy
                 state.LastCatalogEtag = newEtag;
                 state.Save();
                 _log.LogInfo("All mods up to date");
+                SendReport("up_to_date", state.Mods, null);
                 return SyncResult.UpToDate;
             }
 
@@ -188,6 +191,7 @@ namespace Convoy
                     if (!VerifyHashes(extractedFiles, expectedChecksums, stagingDir))
                     {
                         _log.LogError("Hash verification failed, aborting sync");
+                        SendReport("failed", null, "hash verification failed");
                         return SyncResult.Failed;
                     }
 
@@ -233,6 +237,7 @@ namespace Convoy
             state.Save();
 
             _log.LogWarning("Convoy sync complete — restart required for changes to take effect");
+            SendReport("updated", state.Mods, null);
             return SyncResult.RestartRequired;
         }
 
@@ -399,6 +404,33 @@ namespace Convoy
                     }
                     catch { break; }
                 }
+            }
+        }
+
+        private void SendReport(string result, List<ModState>? mods, string? error)
+        {
+            try
+            {
+                var report = new Dictionary<string, object>
+                {
+                    ["aid"] = SPT.Common.Http.RequestHandler.SessionId,
+                    ["result"] = result,
+                    ["client_version"] = VersionInfo.Version,
+                };
+
+                if (mods != null)
+                    report["mods"] = mods.Select(m => new { id = m.Id, version = m.Version }).ToArray();
+
+                if (error != null)
+                    report["error"] = error;
+
+                var json = JsonConvert.SerializeObject(report);
+                SPT.Common.Http.RequestHandler.PostJson("/quma/convoy/report", json);
+                _log.LogDebug($"Sync report sent: {result}");
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning($"Failed to send sync report: {ex.Message}");
             }
         }
     }
