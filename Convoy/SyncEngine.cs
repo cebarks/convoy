@@ -237,7 +237,9 @@ namespace Convoy
         }
 
         private const int CatalogTimeoutMs = 15_000;
-        private const int DownloadTimeoutMs = 120_000;
+        private const int DownloadConnectTimeoutMs = 30_000;
+        private const int MinBitrateBytes = 10 * 1024; // 10 KB/s
+        private const int StallWindowSeconds = 15;
 
         private (Catalog?, string?) FetchCatalog(string serverUrl, string? lastEtag)
         {
@@ -267,12 +269,13 @@ namespace Convoy
             }
         }
 
-        private byte[] DownloadMods(string serverUrl, List<int> modIds)
+        private byte[] DownloadMods(string serverUrl, List<int> modIds, SyncProgress? progress = null)
         {
             var request = WebRequest.CreateHttp($"{serverUrl}/quma/convoy/download");
             request.Method = "POST";
             request.ContentType = "application/json";
-            request.Timeout = DownloadTimeoutMs;
+            request.Timeout = DownloadConnectTimeoutMs;
+            request.ReadWriteTimeout = DownloadConnectTimeoutMs;
 
             var body = Encoding.UTF8.GetBytes(
                 JsonConvert.SerializeObject(new { mods = modIds }));
@@ -283,10 +286,53 @@ namespace Convoy
 
             using (var response = request.GetResponse())
             using (var stream = response.GetResponseStream()!)
-            using (var ms = new MemoryStream())
             {
-                stream.CopyTo(ms);
-                return ms.ToArray();
+                var totalBytes = response.ContentLength;
+                if (progress != null && totalBytes > 0)
+                    progress.SetDownloadProgress(0, totalBytes);
+
+                var capacity = totalBytes > 0 && totalBytes <= int.MaxValue ? (int)totalBytes : 4096;
+                using (var ms = new MemoryStream(capacity))
+                {
+                    var buffer = new byte[8192];
+                    long received = 0;
+                    var samples = new List<(double time, long bytes)>();
+                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                    double lastSampleTime = 0;
+
+                    int bytesRead;
+                    while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        ms.Write(buffer, 0, bytesRead);
+                        received += bytesRead;
+                        progress?.SetDownloadProgress(received, totalBytes);
+
+                        var elapsed = stopwatch.Elapsed.TotalSeconds;
+                        if (elapsed - lastSampleTime >= 1.0)
+                        {
+                            samples.Add((elapsed, received));
+                            lastSampleTime = elapsed;
+
+                            while (samples.Count > 1 && elapsed - samples[0].time > StallWindowSeconds)
+                                samples.RemoveAt(0);
+
+                            if (samples.Count >= 2)
+                            {
+                                var window = samples[samples.Count - 1].time - samples[0].time;
+                                if (window >= StallWindowSeconds)
+                                {
+                                    var bytesInWindow = samples[samples.Count - 1].bytes - samples[0].bytes;
+                                    var bitrate = bytesInWindow / window;
+                                    if (bitrate < MinBitrateBytes)
+                                        throw new TimeoutException(
+                                            $"Download stalled: {bitrate / 1024:F1} KB/s avg over {StallWindowSeconds}s (minimum {MinBitrateBytes / 1024} KB/s)");
+                                }
+                            }
+                        }
+                    }
+
+                    return ms.ToArray();
+                }
             }
         }
 
