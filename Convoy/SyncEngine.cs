@@ -81,27 +81,32 @@ namespace Convoy
             _gameRoot = Paths.GameRootPath;
         }
 
-        public SyncResult Run()
+        public SyncResult Run(SyncProgress? progress = null)
         {
             try
             {
-                return RunSync();
+                var result = RunSync(progress);
+                progress?.Complete(result);
+                return result;
             }
             catch (Exception ex)
             {
                 _log.LogError($"Convoy sync failed: {ex.Message}");
                 _log.LogDebug(ex);
+                progress?.Complete(SyncResult.Failed, ex.Message);
                 return SyncResult.Failed;
             }
         }
 
-        private SyncResult RunSync()
+        private SyncResult RunSync(SyncProgress? progress)
         {
+            progress?.SetPhase("Cleaning up...");
             CleanPendingDeletes();
 
             var state = ConvoyState.Load();
             var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
 
+            progress?.SetPhase("Fetching catalog...");
             var (catalog, newEtag) = FetchCatalog(serverUrl, state.LastCatalogEtag);
             if (catalog == null)
             {
@@ -154,7 +159,6 @@ namespace Convoy
                 _log.LogInfo($"Removing: {string.Join(", ", names)}");
             }
 
-            // Clean up files from old versions before downloading new ones
             foreach (var modId in toDownload)
             {
                 if (!currentMods.TryGetValue(modId, out var oldMod)) continue;
@@ -170,7 +174,10 @@ namespace Convoy
 
             if (toDownload.Count > 0)
             {
-                var zipBytes = DownloadMods(serverUrl, toDownload);
+                progress?.SetPhase($"Downloading {toDownload.Count} mod{(toDownload.Count == 1 ? "" : "s")}...");
+                var zipBytes = DownloadMods(serverUrl, toDownload, progress);
+
+                progress?.SetPhase("Extracting...");
                 var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
                 try
                 {
@@ -185,12 +192,14 @@ namespace Convoy
                     if (unverified.Count > 0)
                         _log.LogWarning($"ZIP contained {unverified.Count} file(s) not in catalog checksums");
 
+                    progress?.SetPhase("Verifying hashes...");
                     if (!VerifyHashes(extractedFiles, expectedChecksums, stagingDir))
                     {
                         _log.LogError("Hash verification failed, aborting sync");
                         return SyncResult.Failed;
                     }
 
+                    progress?.SetPhase("Installing files...");
                     MoveToGameRoot(extractedFiles, stagingDir);
                 }
                 finally
@@ -200,22 +209,26 @@ namespace Convoy
                 }
             }
 
-            foreach (var modId in toRemove)
+            if (toRemove.Count > 0)
             {
-                if (!currentMods.TryGetValue(modId, out var mod)) continue;
-                foreach (var file in mod.Files)
+                progress?.SetPhase("Removing old mods...");
+                foreach (var modId in toRemove)
                 {
-                    if (exclusions.Contains(file.Path)) continue;
-                    var fullPath = ResolvePath(file.Path);
-                    if (File.Exists(fullPath))
+                    if (!currentMods.TryGetValue(modId, out var mod)) continue;
+                    foreach (var file in mod.Files)
                     {
-                        File.Delete(fullPath);
-                        _log.LogInfo($"Removed: {file.Path}");
+                        if (exclusions.Contains(file.Path)) continue;
+                        var fullPath = ResolvePath(file.Path);
+                        if (File.Exists(fullPath))
+                        {
+                            File.Delete(fullPath);
+                            _log.LogInfo($"Removed: {file.Path}");
+                        }
                     }
+                    CleanEmptyDirs(mod.Files
+                        .Where(f => !exclusions.Contains(f.Path))
+                        .Select(f => ResolvePath(f.Path)));
                 }
-                CleanEmptyDirs(mod.Files
-                    .Where(f => !exclusions.Contains(f.Path))
-                    .Select(f => ResolvePath(f.Path)));
             }
 
             state.ServerUrl = serverUrl;
