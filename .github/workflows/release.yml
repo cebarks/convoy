@@ -26,7 +26,7 @@ jobs:
           cp Convoy/bin/Release/Convoy.dll staging/BepInEx/plugins/Convoy/
           cd staging && zip -r ../Convoy.zip BepInEx/
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
           files: Convoy.zip
           generate_release_notes: true
