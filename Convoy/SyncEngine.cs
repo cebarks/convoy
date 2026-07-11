@@ -79,6 +79,7 @@ namespace Convoy
         public Catalog Catalog = new Catalog();
         public ConvoyState State = new ConvoyState();
         public Dictionary<int, CatalogMod> WantedMods = new Dictionary<int, CatalogMod>();
+        public Dictionary<int, CatalogMod> SkippableMods = new Dictionary<int, CatalogMod>();
         public string? NewEtag;
         public string ServerUrl = "";
         public List<PlannedMod> Installs = new List<PlannedMod>();
@@ -240,6 +241,7 @@ namespace Convoy
                 Catalog = catalog,
                 State = state,
                 WantedMods = wantedMods,
+                SkippableMods = skippedWanted,
                 NewEtag = newEtag,
                 ServerUrl = serverUrl,
                 Installs = installs,
@@ -256,10 +258,14 @@ namespace Convoy
             var currentMods = state.Mods.ToDictionary(m => m.Id);
             var confirmedSet = new HashSet<int>(confirmedModIds);
 
+            var allEligible = new Dictionary<int, CatalogMod>(plan.WantedMods);
+            foreach (var kv in plan.SkippableMods)
+                allEligible[kv.Key] = kv.Value;
+
             foreach (var modId in confirmedModIds)
             {
                 if (!currentMods.TryGetValue(modId, out var oldMod)) continue;
-                if (!plan.WantedMods.TryGetValue(modId, out var newMod)) continue;
+                if (!allEligible.TryGetValue(modId, out var newMod)) continue;
                 var newFiles = new HashSet<string>(newMod.FileChecksums.Keys);
                 foreach (var file in oldMod.Files.Where(f => !newFiles.Contains(f.Path)))
                 {
@@ -284,7 +290,7 @@ namespace Convoy
                     var expectedChecksums = new Dictionary<string, string>();
                     foreach (var id in confirmedModIds)
                     {
-                        if (!plan.WantedMods.TryGetValue(id, out var m)) continue;
+                        if (!allEligible.TryGetValue(id, out var m)) continue;
                         foreach (var kv in m.FileChecksums)
                             expectedChecksums[kv.Key] = kv.Value;
                     }
@@ -334,18 +340,24 @@ namespace Convoy
                 }
             }
 
-            // Rebuild state: refresh ALL wanted mods from catalog (matches pre-split behavior)
-            var newMods = plan.WantedMods.Values.Select(m => new ModState
+            var newMods = new List<ModState>();
+            foreach (var kv in allEligible)
             {
-                Id = m.Id,
-                Version = m.Version,
-                Files = m.FileChecksums.Select(kv => new ModFileState { Path = kv.Key, Hash = kv.Value }).ToList()
-            }).ToList();
-            // Skipped mods that were previously installed keep their on-disk state
-            foreach (var id in skippedModIds)
-            {
-                if (currentMods.TryGetValue(id, out var existing))
-                    newMods.Add(existing);
+                if (removeIds.Contains(kv.Key)) continue;
+
+                if (skippedModIds.Contains(kv.Key))
+                {
+                    if (currentMods.TryGetValue(kv.Key, out var existing))
+                        newMods.Add(existing);
+                    continue;
+                }
+
+                newMods.Add(new ModState
+                {
+                    Id = kv.Value.Id,
+                    Version = kv.Value.Version,
+                    Files = kv.Value.FileChecksums.Select(f => new ModFileState { Path = f.Key, Hash = f.Value }).ToList()
+                });
             }
 
             var catalogIds = new HashSet<int>(
