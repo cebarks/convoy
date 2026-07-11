@@ -17,6 +17,7 @@ namespace Convoy
         private void Awake()
         {
             var config = new ConvoyConfig(Config);
+            config.RegisterCachedGroups(ConvoyState.Load().OptionalGroups);
             var engine = new SyncEngine(Logger, config);
             var progress = new SyncProgress();
             _progress = progress;

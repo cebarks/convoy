@@ -116,7 +116,7 @@ namespace Convoy
                 return SyncResult.UpToDate;
             }
 
-            _config.RegisterOptionalGroups(catalog.Groups);
+            state.OptionalGroups = _config.RegisterOptionalGroups(catalog.Groups);
 
             var wantedMods = new Dictionary<int, CatalogMod>();
             foreach (var group in catalog.Groups)
