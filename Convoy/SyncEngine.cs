@@ -110,34 +110,6 @@ namespace Convoy
             _gameRoot = Paths.GameRootPath;
         }
 
-        public SyncResult Run(SyncProgress? progress = null)
-        {
-            try
-            {
-                var plan = PlanSync(progress);
-                if (plan == null)
-                {
-                    progress?.Complete(SyncResult.UpToDate);
-                    return SyncResult.UpToDate;
-                }
-
-                var confirmedModIds = plan.Installs.Concat(plan.Updates)
-                    .Select(m => m.Id).ToList();
-                var skippedModIds = new HashSet<int>(plan.State.SkippedMods);
-                var result = ExecuteSync(plan, confirmedModIds, skippedModIds, progress);
-                progress?.Complete(result);
-                return result;
-            }
-            catch (Exception ex)
-            {
-                _log.LogError($"Convoy sync failed: {ex.Message}");
-                _log.LogDebug(ex);
-                SendReport("failed", null, ex.Message);
-                progress?.Complete(SyncResult.Failed, ex.Message);
-                return SyncResult.Failed;
-            }
-        }
-
         public SyncPlan? PlanSync(SyncProgress? progress = null)
         {
             progress?.SetPhase("Cleaning up...");
