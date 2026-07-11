@@ -26,6 +26,18 @@ namespace Convoy
         public List<ModFileState> Files { get; set; } = new List<ModFileState>();
     }
 
+    public class CachedGroup
+    {
+        [JsonProperty("slug")]
+        public string Slug { get; set; } = "";
+
+        [JsonProperty("name")]
+        public string Name { get; set; } = "";
+
+        [JsonProperty("description")]
+        public string Description { get; set; } = "";
+    }
+
     public class ConvoyState
     {
         [JsonProperty("server_url")]
@@ -36,6 +48,9 @@ namespace Convoy
 
         [JsonProperty("mods")]
         public List<ModState> Mods { get; set; } = new List<ModState>();
+
+        [JsonProperty("optional_groups")]
+        public List<CachedGroup> OptionalGroups { get; set; } = new List<CachedGroup>();
 
         private static string FilePath =>
             System.IO.Path.Combine(Paths.ConfigPath, "Convoy", "state.json");

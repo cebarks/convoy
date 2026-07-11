@@ -15,16 +15,25 @@ namespace Convoy
             _config = config;
         }
 
-        public void RegisterOptionalGroups(List<CatalogGroup> groups)
+        public List<CachedGroup> RegisterOptionalGroups(List<CatalogGroup> groups)
         {
+            var cached = new List<CachedGroup>();
             foreach (var group in groups.Where(g => g.Tier == "optional"))
             {
                 var modList = string.Join(", ", group.Mods.Select(m => $"{m.Name} v{m.Version}"));
-                _groupToggles[group.Slug] = _config.Bind(
-                    group.Name,
-                    "Enabled",
-                    false,
-                    $"Install mods in this group: {modList}");
+                var desc = $"Install mods in this group: {modList}";
+                _groupToggles[group.Slug] = _config.Bind(group.Name, "Enabled", false, desc);
+                cached.Add(new CachedGroup { Slug = group.Slug, Name = group.Name, Description = desc });
+            }
+            return cached;
+        }
+
+        public void RegisterCachedGroups(List<CachedGroup> groups)
+        {
+            foreach (var g in groups)
+            {
+                if (!_groupToggles.ContainsKey(g.Slug))
+                    _groupToggles[g.Slug] = _config.Bind(g.Name, "Enabled", false, g.Description);
             }
         }
 
