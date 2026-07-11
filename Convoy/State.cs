@@ -52,6 +52,9 @@ namespace Convoy
         [JsonProperty("optional_groups")]
         public List<CachedGroup> OptionalGroups { get; set; } = new List<CachedGroup>();
 
+        [JsonProperty("skipped_mods")]
+        public HashSet<int> SkippedMods { get; set; } = new HashSet<int>();
+
         private static string FilePath =>
             System.IO.Path.Combine(Paths.ConfigPath, "Convoy", "state.json");
 

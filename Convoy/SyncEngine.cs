@@ -61,6 +61,35 @@ namespace Convoy
 
     #endregion
 
+    #region Sync Plan
+
+    public class PlannedMod
+    {
+        public int Id;
+        public string Name = "";
+        public string Version = "";
+        public string? OldVersion;
+        public string GroupName = "";
+        public string GroupSlug = "";
+        public bool IsRequired;
+    }
+
+    public class SyncPlan
+    {
+        public Catalog Catalog = new Catalog();
+        public ConvoyState State = new ConvoyState();
+        public Dictionary<int, CatalogMod> WantedMods = new Dictionary<int, CatalogMod>();
+        public string? NewEtag;
+        public string ServerUrl = "";
+        public List<PlannedMod> Installs = new List<PlannedMod>();
+        public List<PlannedMod> Updates = new List<PlannedMod>();
+        public List<PlannedMod> Removals = new List<PlannedMod>();
+        public List<PlannedMod> Skipped = new List<PlannedMod>();
+        public HashSet<string> Exclusions = new HashSet<string>();
+    }
+
+    #endregion
+
     public enum SyncResult
     {
         UpToDate,
