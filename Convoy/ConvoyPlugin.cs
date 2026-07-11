@@ -123,7 +123,7 @@ namespace Convoy
                         switch (_execProgress.Result)
                         {
                             case SyncResult.Failed:
-                                ShowStatus("Convoy: sync failed", Color.red, 15f);
+                                ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
                                 break;
                             case SyncResult.RestartRequired:
                                 ShowStatus("Convoy: mods updated — restart required", Color.yellow, 20f);
