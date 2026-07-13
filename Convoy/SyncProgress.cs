@@ -2,6 +2,15 @@ using System.Threading;
 
 namespace Convoy
 {
+    public class SyncOutcome
+    {
+        public SyncResult Result;
+        public string? Error;
+        public string? SptVersion;
+        public string? QuartermasterVersion;
+        public string? ServerUrl;
+    }
+
     public class SyncProgress
     {
         private volatile string _phase = "Initializing...";
@@ -10,6 +19,9 @@ namespace Convoy
         private volatile bool _isComplete;
         private SyncResult? _result; // ordering guaranteed by volatile _isComplete fence
         private volatile string? _error;
+
+        // ordering guaranteed by volatile _isComplete fence
+        public SyncOutcome? Outcome { get; private set; }
 
         public string Phase => _phase;
         public long BytesReceived => Interlocked.Read(ref _bytesReceived);
@@ -31,10 +43,20 @@ namespace Convoy
             Interlocked.Exchange(ref _totalBytes, total);
         }
 
-        public void Complete(SyncResult result, string? error = null)
+        public void Complete(SyncResult result, string? error = null,
+                             string? sptVersion = null, string? qmVersion = null,
+                             string? serverUrl = null)
         {
             _result = result;
             _error = error;
+            Outcome = new SyncOutcome
+            {
+                Result = result,
+                Error = error,
+                SptVersion = sptVersion,
+                QuartermasterVersion = qmVersion,
+                ServerUrl = serverUrl
+            };
             _isComplete = true; // must be last — reader checks this first
         }
     }

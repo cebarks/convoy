@@ -52,6 +52,9 @@ namespace Convoy
         [JsonProperty("spt_version")]
         public string SptVersion { get; set; } = "";
 
+        [JsonProperty("quartermaster_version")]
+        public string QuartermasterVersion { get; set; } = "";
+
         [JsonProperty("groups")]
         public List<CatalogGroup> Groups { get; set; } = new List<CatalogGroup>();
 
@@ -83,10 +86,12 @@ namespace Convoy
 
         public SyncResult Run(SyncProgress? progress = null)
         {
+            Catalog? catalog = null;
+            string? serverUrl = null;
             try
             {
-                var result = RunSync(progress);
-                progress?.Complete(result);
+                var result = RunSync(progress, out catalog, out serverUrl);
+                progress?.Complete(result, null, catalog?.SptVersion, catalog?.QuartermasterVersion, serverUrl);
                 return result;
             }
             catch (Exception ex)
@@ -94,21 +99,24 @@ namespace Convoy
                 _log.LogError($"Convoy sync failed: {ex.Message}");
                 _log.LogDebug(ex);
                 SendReport("failed", null, ex.Message);
-                progress?.Complete(SyncResult.Failed, ex.Message);
+                progress?.Complete(SyncResult.Failed, ex.Message, catalog?.SptVersion, catalog?.QuartermasterVersion, serverUrl);
                 return SyncResult.Failed;
             }
         }
 
-        private SyncResult RunSync(SyncProgress? progress)
+        private SyncResult RunSync(SyncProgress? progress, out Catalog? catalog, out string? serverUrl)
         {
+            catalog = null;
+            serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
+
             progress?.SetPhase("Cleaning up...");
             CleanPendingDeletes();
 
             var state = ConvoyState.Load();
-            var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
 
             progress?.SetPhase("Fetching catalog...");
-            var (catalog, newEtag) = FetchCatalog(serverUrl, state.LastCatalogEtag);
+            var (fetchedCatalog, newEtag) = FetchCatalog(serverUrl, state.LastCatalogEtag);
+            catalog = fetchedCatalog;
             if (catalog == null)
             {
                 _log.LogInfo("Catalog unchanged, skipping sync");
