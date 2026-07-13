@@ -99,7 +99,7 @@ namespace Convoy
                     {
                         if (_planProgress.Result == SyncResult.Failed)
                         {
-                            UpdateDebugState(SyncResult.Failed, _planProgress.Error);
+                            UpdateDebugState(SyncResult.Failed, _planProgress.Error, _pendingPlan);
                             ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
                             _state = PluginState.Complete;
                         }
@@ -112,6 +112,7 @@ namespace Convoy
                         else
                         {
                             _plan = _pendingPlan;
+                            UpdateDebugState(SyncResult.UpToDate, null, _plan);
                             InitConfirmationUI(_plan);
                             _state = PluginState.AwaitingConfirmation;
                         }
@@ -136,7 +137,7 @@ namespace Convoy
                                 ShowStatus("Convoy: mods up to date", Color.green, 5f);
                                 break;
                         }
-                        UpdateDebugState(_execProgress.Result ?? SyncResult.UpToDate, _execProgress.Error);
+                        UpdateDebugState(_execProgress.Result ?? SyncResult.UpToDate, _execProgress.Error, _plan);
                         _execThread = null;
                         _execProgress = null;
                         _plan = null;
@@ -160,10 +161,9 @@ namespace Convoy
             }
         }
 
-        private void UpdateDebugState(SyncResult result, string? error = null)
+        private void UpdateDebugState(SyncResult result, string? error = null, SyncPlan? plan = null)
         {
             if (_config == null) return;
-            var plan = _plan;
             _config.UpdateDebugState(new SyncOutcome
             {
                 Result = result,
