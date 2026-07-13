@@ -4,6 +4,14 @@ using BepInEx.Configuration;
 
 namespace Convoy
 {
+    // Must match BepInEx.ConfigurationManager's expected class name exactly — it reflects on this
+    internal sealed class ConfigurationManagerAttributes
+    {
+        public bool? ReadOnly;
+        public bool? HideDefaultButton;
+        public int? Order;
+    }
+
     public class ConvoyConfig
     {
         private readonly ConfigFile _config;
@@ -48,22 +56,19 @@ namespace Convoy
         public bool IsGroupEnabled(string slug) =>
             _groupToggles.TryGetValue(slug, out var entry) && entry.Value;
 
+        private static ConfigDescription ReadOnlyDesc(string desc, int order) =>
+            new ConfigDescription(desc, null, new ConfigurationManagerAttributes { ReadOnly = true, HideDefaultButton = true, Order = order });
+
         public void RegisterDebugEntries()
         {
-            _convoyVersion = _config.Bind("Debug", "Convoy Version", VersionInfo.Version,
-                new ConfigDescription("Convoy plugin version", null, new { ReadOnly = true, Order = 7 }));
-            _qmVersion = _config.Bind("Debug", "Quartermaster Version", "unknown",
-                new ConfigDescription("Quartermaster server version", null, new { ReadOnly = true, Order = 6 }));
-            _sptVersion = _config.Bind("Debug", "SPT Version", "unknown",
-                new ConfigDescription("SPT version from catalog", null, new { ReadOnly = true, Order = 5 }));
-            _lastResult = _config.Bind("Debug", "Last Sync Result", "pending",
-                new ConfigDescription("Result of the last sync", null, new { ReadOnly = true, Order = 4 }));
-            _lastError = _config.Bind("Debug", "Last Error", "",
-                new ConfigDescription("Error from last sync (if any)", null, new { ReadOnly = true, Order = 3 }));
-            _serverUrl = _config.Bind("Debug", "Server URL", "",
-                new ConfigDescription("Quartermaster server URL", null, new { ReadOnly = true, Order = 2 }));
+            _convoyVersion = _config.Bind("Debug", "Convoy Version", VersionInfo.Version, ReadOnlyDesc("Convoy plugin version", 7));
+            _qmVersion = _config.Bind("Debug", "Quartermaster Version", "unknown", ReadOnlyDesc("Quartermaster server version", 6));
+            _sptVersion = _config.Bind("Debug", "SPT Version", "unknown", ReadOnlyDesc("SPT version from catalog", 5));
+            _lastResult = _config.Bind("Debug", "Last Sync Result", "pending", ReadOnlyDesc("Result of the last sync", 4));
+            _lastError = _config.Bind("Debug", "Last Error", "", ReadOnlyDesc("Error from last sync (if any)", 3));
+            _serverUrl = _config.Bind("Debug", "Server URL", "", ReadOnlyDesc("Quartermaster server URL", 2));
             SyncNow = _config.Bind("Debug", "Sync Now", false,
-                new ConfigDescription("Toggle to trigger a manual re-sync", null, new { Order = 1 }));
+                new ConfigDescription("Toggle to trigger a manual re-sync", null, new ConfigurationManagerAttributes { Order = 1 }));
         }
 
         public void UpdateDebugState(SyncOutcome outcome)
