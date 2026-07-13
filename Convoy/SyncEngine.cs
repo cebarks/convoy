@@ -611,7 +611,16 @@ namespace Convoy
                     report["error"] = error;
 
                 var json = JsonConvert.SerializeObject(report);
-                SPT.Common.Http.RequestHandler.PostJson("/quma/convoy/report", json);
+                var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
+                var request = WebRequest.CreateHttp($"{serverUrl}/quma/convoy/report");
+                request.Method = "POST";
+                request.ContentType = "application/json";
+                request.Timeout = 10_000;
+                var body = Encoding.UTF8.GetBytes(json);
+                request.ContentLength = body.Length;
+                using (var s = request.GetRequestStream())
+                    s.Write(body, 0, body.Length);
+                using (request.GetResponse()) { }
                 _log.LogDebug($"Sync report sent: {result}");
             }
             catch (Exception ex)
