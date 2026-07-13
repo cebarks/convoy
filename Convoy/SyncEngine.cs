@@ -64,6 +64,36 @@ namespace Convoy
 
     #endregion
 
+    #region Sync Plan
+
+    public class PlannedMod
+    {
+        public int Id;
+        public string Name = "";
+        public string Version = "";
+        public string? OldVersion;
+        public string GroupName = "";
+        public string GroupSlug = "";
+        public bool IsRequired;
+    }
+
+    public class SyncPlan
+    {
+        public Catalog Catalog = new Catalog();
+        public ConvoyState State = new ConvoyState();
+        public Dictionary<int, CatalogMod> WantedMods = new Dictionary<int, CatalogMod>();
+        public Dictionary<int, CatalogMod> SkippableMods = new Dictionary<int, CatalogMod>();
+        public string? NewEtag;
+        public string ServerUrl = "";
+        public List<PlannedMod> Installs = new List<PlannedMod>();
+        public List<PlannedMod> Updates = new List<PlannedMod>();
+        public List<PlannedMod> Removals = new List<PlannedMod>();
+        public List<PlannedMod> Skipped = new List<PlannedMod>();
+        public HashSet<string> Exclusions = new HashSet<string>();
+    }
+
+    #endregion
+
     public enum SyncResult
     {
         UpToDate,
@@ -84,109 +114,175 @@ namespace Convoy
             _gameRoot = Paths.GameRootPath;
         }
 
-        public SyncResult Run(SyncProgress? progress = null)
+        public SyncPlan? PlanSync(SyncProgress? progress = null)
         {
-            Catalog? catalog = null;
-            string? serverUrl = null;
-            try
-            {
-                var result = RunSync(progress, out catalog, out serverUrl);
-                progress?.Complete(result, null, catalog?.SptVersion, catalog?.QuartermasterVersion, serverUrl);
-                return result;
-            }
-            catch (Exception ex)
-            {
-                _log.LogError($"Convoy sync failed: {ex.Message}");
-                _log.LogDebug(ex);
-                SendReport("failed", null, ex.Message);
-                progress?.Complete(SyncResult.Failed, ex.Message, catalog?.SptVersion, catalog?.QuartermasterVersion, serverUrl);
-                return SyncResult.Failed;
-            }
-        }
-
-        private SyncResult RunSync(SyncProgress? progress, out Catalog? catalog, out string? serverUrl)
-        {
-            catalog = null;
-            serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
-
             progress?.SetPhase("Cleaning up...");
             CleanPendingDeletes();
 
             var state = ConvoyState.Load();
+            var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
 
             progress?.SetPhase("Fetching catalog...");
-            var (fetchedCatalog, newEtag) = FetchCatalog(serverUrl, state.LastCatalogEtag);
-            catalog = fetchedCatalog;
+            var (catalog, newEtag) = FetchCatalog(serverUrl, state.LastCatalogEtag);
             if (catalog == null)
             {
                 _log.LogInfo("Catalog unchanged, skipping sync");
                 SendReport("up_to_date", state.Mods, null);
-                return SyncResult.UpToDate;
+                return null;
             }
 
             state.OptionalGroups = _config.RegisterOptionalGroups(catalog.Groups);
 
+            var catalogModGroups = new Dictionary<int, (CatalogMod mod, CatalogGroup group)>();
+            foreach (var group in catalog.Groups)
+                foreach (var mod in group.Mods)
+                    catalogModGroups[mod.Id] = (mod, group);
+
             var wantedMods = new Dictionary<int, CatalogMod>();
+            var skippedWanted = new Dictionary<int, CatalogMod>();
             foreach (var group in catalog.Groups)
             {
-                if (group.Tier != "required" && !_config.IsGroupEnabled(group.Slug))
+                bool isRequired = group.Tier == "required";
+                if (!isRequired && !_config.IsGroupEnabled(group.Slug))
                     continue;
+
                 foreach (var mod in group.Mods)
-                    wantedMods[mod.Id] = mod;
+                {
+                    if (!isRequired && state.SkippedMods.Contains(mod.Id))
+                        skippedWanted[mod.Id] = mod;
+                    else
+                        wantedMods[mod.Id] = mod;
+                }
             }
 
             var currentMods = state.Mods.ToDictionary(m => m.Id);
 
-            var toDownload = new List<int>();
+            var installs = new List<PlannedMod>();
+            var updates = new List<PlannedMod>();
             foreach (var kvp in wantedMods)
             {
-                if (!currentMods.TryGetValue(kvp.Key, out var current) || current.Version != kvp.Value.Version)
-                    toDownload.Add(kvp.Key);
+                var (mod, group) = catalogModGroups[kvp.Key];
+                if (!currentMods.TryGetValue(kvp.Key, out var current))
+                {
+                    installs.Add(new PlannedMod
+                    {
+                        Id = mod.Id, Name = mod.Name, Version = mod.Version,
+                        GroupName = group.Name, GroupSlug = group.Slug,
+                        IsRequired = group.Tier == "required"
+                    });
+                }
+                else if (current.Version != mod.Version)
+                {
+                    updates.Add(new PlannedMod
+                    {
+                        Id = mod.Id, Name = mod.Name, Version = mod.Version,
+                        OldVersion = current.Version,
+                        GroupName = group.Name, GroupSlug = group.Slug,
+                        IsRequired = group.Tier == "required"
+                    });
+                }
             }
 
-            var toRemove = currentMods.Keys.Where(id => !wantedMods.ContainsKey(id)).ToList();
+            var allKeptIds = new HashSet<int>(wantedMods.Keys);
+            allKeptIds.UnionWith(skippedWanted.Keys);
+            var removals = new List<PlannedMod>();
+            foreach (var id in currentMods.Keys.Where(id => !allKeptIds.Contains(id)))
+            {
+                var current = currentMods[id];
+                var hasInfo = catalogModGroups.TryGetValue(id, out var info);
+                removals.Add(new PlannedMod
+                {
+                    Id = id,
+                    Name = hasInfo ? info.mod.Name : $"Mod {id}",
+                    Version = current.Version,
+                    GroupName = hasInfo ? info.group.Name : "",
+                    GroupSlug = hasInfo ? info.group.Slug : "",
+                    IsRequired = false
+                });
+            }
 
-            if (toDownload.Count == 0 && toRemove.Count == 0)
+            var skippedPlan = new List<PlannedMod>();
+            foreach (var kvp in skippedWanted)
+            {
+                var (mod, group) = catalogModGroups[kvp.Key];
+                if (!currentMods.TryGetValue(kvp.Key, out var current) || current.Version != mod.Version)
+                {
+                    skippedPlan.Add(new PlannedMod
+                    {
+                        Id = mod.Id, Name = mod.Name, Version = mod.Version,
+                        OldVersion = current?.Version,
+                        GroupName = group.Name, GroupSlug = group.Slug,
+                        IsRequired = false
+                    });
+                }
+            }
+
+            if (installs.Count == 0 && updates.Count == 0 && removals.Count == 0)
             {
                 state.LastCatalogEtag = newEtag;
+                var catalogIds = new HashSet<int>(catalogModGroups.Keys);
+                state.SkippedMods.IntersectWith(catalogIds);
                 state.Save();
                 _log.LogInfo("All mods up to date");
                 SendReport("up_to_date", state.Mods, null);
-                return SyncResult.UpToDate;
+                return null;
             }
 
-            var exclusions = new HashSet<string>(catalog.Exclusions);
-
-            if (toDownload.Count > 0)
+            if (installs.Count > 0 || updates.Count > 0)
             {
-                var names = toDownload.Select(id => wantedMods[id].Name);
+                var names = installs.Concat(updates).Select(m => m.Name);
                 _log.LogInfo($"Installing/updating: {string.Join(", ", names)}");
             }
-            if (toRemove.Count > 0)
+            if (removals.Count > 0)
             {
-                var names = toRemove
-                    .Where(id => currentMods.ContainsKey(id))
-                    .Select(id => currentMods[id].Id.ToString());
+                var names = removals.Select(m => m.Name);
                 _log.LogInfo($"Removing: {string.Join(", ", names)}");
             }
 
-            foreach (var modId in toDownload)
+            return new SyncPlan
+            {
+                Catalog = catalog,
+                State = state,
+                WantedMods = wantedMods,
+                SkippableMods = skippedWanted,
+                NewEtag = newEtag,
+                ServerUrl = serverUrl,
+                Installs = installs,
+                Updates = updates,
+                Removals = removals,
+                Skipped = skippedPlan,
+                Exclusions = new HashSet<string>(catalog.Exclusions)
+            };
+        }
+
+        public SyncResult ExecuteSync(SyncPlan plan, List<int> confirmedModIds, HashSet<int> skippedModIds, SyncProgress? progress = null)
+        {
+            var state = plan.State;
+            var currentMods = state.Mods.ToDictionary(m => m.Id);
+            var confirmedSet = new HashSet<int>(confirmedModIds);
+
+            var allEligible = new Dictionary<int, CatalogMod>(plan.WantedMods);
+            foreach (var kv in plan.SkippableMods)
+                allEligible[kv.Key] = kv.Value;
+
+            foreach (var modId in confirmedModIds)
             {
                 if (!currentMods.TryGetValue(modId, out var oldMod)) continue;
-                var newFiles = new HashSet<string>(wantedMods[modId].FileChecksums.Keys);
+                if (!allEligible.TryGetValue(modId, out var newMod)) continue;
+                var newFiles = new HashSet<string>(newMod.FileChecksums.Keys);
                 foreach (var file in oldMod.Files.Where(f => !newFiles.Contains(f.Path)))
                 {
-                    if (exclusions.Contains(file.Path)) continue;
+                    if (plan.Exclusions.Contains(file.Path)) continue;
                     var fullPath = ResolvePath(file.Path);
                     if (File.Exists(fullPath))
                         File.Delete(fullPath);
                 }
             }
 
-            if (toDownload.Count > 0)
+            if (confirmedModIds.Count > 0)
             {
-                progress?.SetPhase($"Downloading {toDownload.Count} mod{(toDownload.Count == 1 ? "" : "s")}...");
-                var zipBytes = DownloadMods(serverUrl, toDownload, progress);
+                progress?.SetPhase($"Downloading {confirmedModIds.Count} mod{(confirmedModIds.Count == 1 ? "" : "s")}...");
+                var zipBytes = DownloadMods(plan.ServerUrl, confirmedModIds, progress);
 
                 progress?.SetPhase("Extracting...");
                 var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
@@ -194,10 +290,13 @@ namespace Convoy
                 {
                     var extractedFiles = ExtractZip(zipBytes, stagingDir);
 
-                    var expectedChecksums = wantedMods.Values
-                        .Where(m => toDownload.Contains(m.Id))
-                        .SelectMany(m => m.FileChecksums)
-                        .ToDictionary(kv => kv.Key, kv => kv.Value);
+                    var expectedChecksums = new Dictionary<string, string>();
+                    foreach (var id in confirmedModIds)
+                    {
+                        if (!allEligible.TryGetValue(id, out var m)) continue;
+                        foreach (var kv in m.FileChecksums)
+                            expectedChecksums[kv.Key] = kv.Value;
+                    }
 
                     var unverified = extractedFiles.Where(p => !expectedChecksums.ContainsKey(p)).ToList();
                     if (unverified.Count > 0)
@@ -221,15 +320,16 @@ namespace Convoy
                 }
             }
 
-            if (toRemove.Count > 0)
+            var removeIds = new HashSet<int>(plan.Removals.Select(r => r.Id));
+            if (removeIds.Count > 0)
             {
                 progress?.SetPhase("Removing old mods...");
-                foreach (var modId in toRemove)
+                foreach (var modId in removeIds)
                 {
                     if (!currentMods.TryGetValue(modId, out var mod)) continue;
                     foreach (var file in mod.Files)
                     {
-                        if (exclusions.Contains(file.Path)) continue;
+                        if (plan.Exclusions.Contains(file.Path)) continue;
                         var fullPath = ResolvePath(file.Path);
                         if (File.Exists(fullPath))
                         {
@@ -238,28 +338,50 @@ namespace Convoy
                         }
                     }
                     CleanEmptyDirs(mod.Files
-                        .Where(f => !exclusions.Contains(f.Path))
+                        .Where(f => !plan.Exclusions.Contains(f.Path))
                         .Select(f => ResolvePath(f.Path)));
                 }
             }
 
-            state.ServerUrl = serverUrl;
-            state.LastCatalogEtag = newEtag;
-            state.Mods = wantedMods.Values.Select(m => new ModState
+            var newMods = new List<ModState>();
+            foreach (var kv in allEligible)
             {
-                Id = m.Id,
-                Version = m.Version,
-                Files = m.FileChecksums.Select(kv => new ModFileState
+                if (removeIds.Contains(kv.Key)) continue;
+
+                if (skippedModIds.Contains(kv.Key))
                 {
-                    Path = kv.Key,
-                    Hash = kv.Value
-                }).ToList()
-            }).ToList();
+                    if (currentMods.TryGetValue(kv.Key, out var existing))
+                        newMods.Add(existing);
+                    continue;
+                }
+
+                newMods.Add(new ModState
+                {
+                    Id = kv.Value.Id,
+                    Version = kv.Value.Version,
+                    Files = kv.Value.FileChecksums.Select(f => new ModFileState { Path = f.Key, Hash = f.Value }).ToList()
+                });
+            }
+
+            var catalogIds = new HashSet<int>(
+                plan.Catalog.Groups.SelectMany(g => g.Mods).Select(m => m.Id));
+            skippedModIds.IntersectWith(catalogIds);
+
+            state.ServerUrl = plan.ServerUrl;
+            state.LastCatalogEtag = plan.NewEtag;
+            state.Mods = newMods;
+            state.SkippedMods = skippedModIds;
             state.Save();
 
-            _log.LogWarning("Convoy sync complete — restart required for changes to take effect");
-            SendReport("updated", state.Mods, null);
-            return SyncResult.RestartRequired;
+            if (confirmedModIds.Count > 0 || removeIds.Count > 0)
+            {
+                _log.LogWarning("Convoy sync complete — restart required for changes to take effect");
+                SendReport("updated", state.Mods, null);
+                return SyncResult.RestartRequired;
+            }
+
+            SendReport("up_to_date", state.Mods, null);
+            return SyncResult.UpToDate;
         }
 
         private const int CatalogTimeoutMs = 15_000;
@@ -474,7 +596,7 @@ namespace Convoy
             }
         }
 
-        private void SendReport(string result, List<ModState>? mods, string? error)
+        internal void SendReport(string result, List<ModState>? mods, string? error)
         {
             try
             {
@@ -492,7 +614,16 @@ namespace Convoy
                     report["error"] = error;
 
                 var json = JsonConvert.SerializeObject(report);
-                SPT.Common.Http.RequestHandler.PostJson("/quma/convoy/report", json);
+                var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
+                var request = WebRequest.CreateHttp($"{serverUrl}/quma/convoy/report");
+                request.Method = "POST";
+                request.ContentType = "application/json";
+                request.Timeout = 10_000;
+                var body = Encoding.UTF8.GetBytes(json);
+                request.ContentLength = body.Length;
+                using (var s = request.GetRequestStream())
+                    s.Write(body, 0, body.Length);
+                using (request.GetResponse()) { }
                 _log.LogDebug($"Sync report sent: {result}");
             }
             catch (Exception ex)

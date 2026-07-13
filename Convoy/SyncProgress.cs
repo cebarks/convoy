@@ -20,9 +20,6 @@ namespace Convoy
         private SyncResult? _result; // ordering guaranteed by volatile _isComplete fence
         private volatile string? _error;
 
-        // ordering guaranteed by volatile _isComplete fence
-        public SyncOutcome? Outcome { get; private set; }
-
         public string Phase => _phase;
         public long BytesReceived => Interlocked.Read(ref _bytesReceived);
         public long TotalBytes => Interlocked.Read(ref _totalBytes);
@@ -43,20 +40,10 @@ namespace Convoy
             Interlocked.Exchange(ref _totalBytes, total);
         }
 
-        public void Complete(SyncResult result, string? error = null,
-                             string? sptVersion = null, string? qmVersion = null,
-                             string? serverUrl = null)
+        public void Complete(SyncResult result, string? error = null)
         {
             _result = result;
             _error = error;
-            Outcome = new SyncOutcome
-            {
-                Result = result,
-                Error = error,
-                SptVersion = sptVersion,
-                QuartermasterVersion = qmVersion,
-                ServerUrl = serverUrl
-            };
             _isComplete = true; // must be last — reader checks this first
         }
     }
