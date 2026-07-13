@@ -38,10 +38,18 @@ namespace BepInEx.Logging
 
 namespace BepInEx.Configuration
 {
+    public class AcceptableValueBase { }
+
+    public class ConfigDescription
+    {
+        public ConfigDescription(string description, AcceptableValueBase? range = null, params object[] tags) { }
+    }
+
     public class ConfigFile
     {
         public ConfigFile(string path, bool save) { }
         public ConfigEntry<T> Bind<T>(string section, string key, T defaultValue, string description = "") => new ConfigEntry<T>();
+        public ConfigEntry<T> Bind<T>(string section, string key, T defaultValue, ConfigDescription description) => new ConfigEntry<T>();
     }
 
     public class ConfigEntry<T>
