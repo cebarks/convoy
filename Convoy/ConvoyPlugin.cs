@@ -7,6 +7,8 @@ namespace Convoy
     [BepInPlugin("io.cebarks.convoy", "Convoy", VersionInfo.Version)]
     public class ConvoyPlugin : BaseUnityPlugin
     {
+        private ConvoyConfig? _config;
+        private SyncEngine? _engine;
         private SyncProgress? _progress;
         private Thread? _syncThread;
 
@@ -16,13 +18,18 @@ namespace Convoy
 
         private void Awake()
         {
-            var config = new ConvoyConfig(Config);
-            config.RegisterCachedGroups(ConvoyState.Load().OptionalGroups);
-            var engine = new SyncEngine(Logger, config);
+            _config = new ConvoyConfig(Config);
+            _config.RegisterCachedGroups(ConvoyState.Load().OptionalGroups);
+            _config.RegisterDebugEntries();
+            _engine = new SyncEngine(Logger, _config);
+            StartSync();
+        }
+
+        private void StartSync()
+        {
             var progress = new SyncProgress();
             _progress = progress;
-
-            _syncThread = new Thread(() => engine.Run(progress))
+            _syncThread = new Thread(() => _engine!.Run(progress))
             {
                 Name = "ConvoySync",
                 IsBackground = true
@@ -32,25 +39,42 @@ namespace Convoy
 
         private void Update()
         {
-            if (_progress == null || !_progress.IsComplete)
-                return;
-
-            switch (_progress.Result)
+            if (_progress != null && _progress.IsComplete)
             {
-                case SyncResult.Failed:
-                    Logger.LogError("Convoy sync failed — check log above for details");
-                    ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
-                    break;
-                case SyncResult.RestartRequired:
-                    ShowStatus("Convoy: mods updated — restart required", Color.yellow, 20f);
-                    break;
-                default:
-                    ShowStatus("Convoy: mods up to date", Color.green, 5f);
-                    break;
+                switch (_progress.Result)
+                {
+                    case SyncResult.Failed:
+                        Logger.LogError("Convoy sync failed — check log above for details");
+                        ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
+                        break;
+                    case SyncResult.RestartRequired:
+                        ShowStatus("Convoy: mods updated — restart required", Color.yellow, 20f);
+                        break;
+                    default:
+                        ShowStatus("Convoy: mods up to date", Color.green, 5f);
+                        break;
+                }
+
+                if (_progress.Outcome != null && _config != null)
+                    _config.UpdateDebugState(_progress.Outcome);
+
+                _syncThread = null;
+                _progress = null;
             }
 
-            _syncThread = null;
-            _progress = null;
+            if (_config?.SyncNow != null && _config.SyncNow.Value)
+            {
+                _config.SyncNow.Value = false;
+                if (_syncThread != null && _syncThread.IsAlive)
+                {
+                    Logger.LogWarning("Convoy: sync already in progress, ignoring manual trigger");
+                }
+                else
+                {
+                    Logger.LogInfo("Convoy: manual sync triggered");
+                    StartSync();
+                }
+            }
         }
 
         private void ShowStatus(string text, Color color, float duration)
