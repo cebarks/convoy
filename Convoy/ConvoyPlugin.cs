@@ -103,9 +103,10 @@ namespace Convoy
                             ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
                             _state = PluginState.Complete;
                         }
-                        else if (_pendingPlan == null)
+                        else if (_pendingPlan == null ||
+                                 (_pendingPlan.Installs.Count == 0 && _pendingPlan.Updates.Count == 0 && _pendingPlan.Removals.Count == 0))
                         {
-                            UpdateDebugState(SyncResult.UpToDate);
+                            UpdateDebugState(SyncResult.UpToDate, null, _pendingPlan);
                             ShowStatus("Convoy: mods up to date", Color.green, 5f);
                             _state = PluginState.Complete;
                         }

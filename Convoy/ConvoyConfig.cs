@@ -20,7 +20,6 @@ namespace Convoy
 
         private ConfigEntry<string>? _convoyVersion;
         private ConfigEntry<string>? _qmVersion;
-        private ConfigEntry<string>? _sptVersion;
         private ConfigEntry<string>? _lastResult;
         private ConfigEntry<string>? _lastError;
         private ConfigEntry<string>? _serverUrl;
@@ -62,8 +61,7 @@ namespace Convoy
         public void RegisterDebugEntries()
         {
             _convoyVersion = _config.Bind("Debug", "Convoy Version", VersionInfo.Version, ReadOnlyDesc("Convoy plugin version", 7));
-            _qmVersion = _config.Bind("Debug", "Quartermaster Version", "unknown", ReadOnlyDesc("Quartermaster server version", 6));
-            _sptVersion = _config.Bind("Debug", "SPT Version", "unknown", ReadOnlyDesc("SPT version from catalog", 5));
+            _qmVersion = _config.Bind("Debug", "Quartermaster Version", "unknown", ReadOnlyDesc("Quartermaster server version", 5));
             _lastResult = _config.Bind("Debug", "Last Sync Result", "pending", ReadOnlyDesc("Result of the last sync", 4));
             _lastError = _config.Bind("Debug", "Last Error", "", ReadOnlyDesc("Error from last sync (if any)", 3));
             _serverUrl = _config.Bind("Debug", "Server URL", "", ReadOnlyDesc("Quartermaster server URL", 2));
@@ -75,8 +73,6 @@ namespace Convoy
         {
             if (_qmVersion != null && !string.IsNullOrEmpty(outcome.QuartermasterVersion))
                 _qmVersion.Value = outcome.QuartermasterVersion!;
-            if (_sptVersion != null && !string.IsNullOrEmpty(outcome.SptVersion))
-                _sptVersion.Value = outcome.SptVersion!;
             if (_lastResult != null)
             {
                 switch (outcome.Result)
