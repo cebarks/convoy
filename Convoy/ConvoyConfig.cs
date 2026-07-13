@@ -9,6 +9,7 @@ namespace Convoy
     {
         public bool? ReadOnly;
         public bool? HideDefaultButton;
+        public bool? IsAdvanced;
         public int? Order;
     }
 
@@ -56,7 +57,7 @@ namespace Convoy
             _groupToggles.TryGetValue(slug, out var entry) && entry.Value;
 
         private static ConfigDescription ReadOnlyDesc(string desc, int order) =>
-            new ConfigDescription(desc, null, new ConfigurationManagerAttributes { ReadOnly = true, HideDefaultButton = true, Order = order });
+            new ConfigDescription(desc, null, new ConfigurationManagerAttributes { ReadOnly = true, HideDefaultButton = true, IsAdvanced = true, Order = order });
 
         public void RegisterDebugEntries()
         {
@@ -66,7 +67,7 @@ namespace Convoy
             _lastError = _config.Bind("Debug", "Last Error", "", ReadOnlyDesc("Error from last sync (if any)", 3));
             _serverUrl = _config.Bind("Debug", "Server URL", "", ReadOnlyDesc("Quartermaster server URL", 2));
             SyncNow = _config.Bind("Debug", "Sync Now", false,
-                new ConfigDescription("Toggle to trigger a manual re-sync", null, new ConfigurationManagerAttributes { Order = 1 }));
+                new ConfigDescription("Toggle to trigger a manual re-sync", null, new ConfigurationManagerAttributes { IsAdvanced = true, Order = 1 }));
         }
 
         public void UpdateDebugState(SyncOutcome outcome)
