@@ -69,9 +69,9 @@ namespace Convoy
         public void UpdateDebugState(SyncOutcome outcome)
         {
             if (_qmVersion != null && !string.IsNullOrEmpty(outcome.QuartermasterVersion))
-                _qmVersion.Value = outcome.QuartermasterVersion;
+                _qmVersion.Value = outcome.QuartermasterVersion!;
             if (_sptVersion != null && !string.IsNullOrEmpty(outcome.SptVersion))
-                _sptVersion.Value = outcome.SptVersion;
+                _sptVersion.Value = outcome.SptVersion!;
             if (_lastResult != null)
             {
                 switch (outcome.Result)
@@ -84,7 +84,7 @@ namespace Convoy
             if (_lastError != null)
                 _lastError.Value = outcome.Error ?? "";
             if (_serverUrl != null && !string.IsNullOrEmpty(outcome.ServerUrl))
-                _serverUrl.Value = outcome.ServerUrl;
+                _serverUrl.Value = outcome.ServerUrl!;
         }
     }
 }
