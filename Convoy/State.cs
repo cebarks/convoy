@@ -43,9 +43,6 @@ namespace Convoy
         [JsonProperty("server_url")]
         public string ServerUrl { get; set; } = "";
 
-        [JsonProperty("last_catalog_etag")]
-        public string? LastCatalogEtag { get; set; }
-
         [JsonProperty("mods")]
         public List<ModState> Mods { get; set; } = new List<ModState>();
 

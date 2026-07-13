@@ -4,5 +4,7 @@
         <OutputType>Library</OutputType>
         <RootNamespace>Stubs</RootNamespace>
         <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
     </PropertyGroup>
 </Project>

@@ -52,6 +52,9 @@ namespace Convoy
         [JsonProperty("spt_version")]
         public string SptVersion { get; set; } = "";
 
+        [JsonProperty("quartermaster_version")]
+        public string QuartermasterVersion { get; set; } = "";
+
         [JsonProperty("groups")]
         public List<CatalogGroup> Groups { get; set; } = new List<CatalogGroup>();
 
@@ -80,7 +83,6 @@ namespace Convoy
         public ConvoyState State = new ConvoyState();
         public Dictionary<int, CatalogMod> WantedMods = new Dictionary<int, CatalogMod>();
         public Dictionary<int, CatalogMod> SkippableMods = new Dictionary<int, CatalogMod>();
-        public string? NewEtag;
         public string ServerUrl = "";
         public List<PlannedMod> Installs = new List<PlannedMod>();
         public List<PlannedMod> Updates = new List<PlannedMod>();
@@ -120,13 +122,7 @@ namespace Convoy
             var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
 
             progress?.SetPhase("Fetching catalog...");
-            var (catalog, newEtag) = FetchCatalog(serverUrl, state.LastCatalogEtag);
-            if (catalog == null)
-            {
-                _log.LogInfo("Catalog unchanged, skipping sync");
-                SendReport("up_to_date", state.Mods, null);
-                return null;
-            }
+            var catalog = FetchCatalog(serverUrl);
 
             state.OptionalGroups = _config.RegisterOptionalGroups(catalog.Groups);
 
@@ -216,13 +212,12 @@ namespace Convoy
 
             if (installs.Count == 0 && updates.Count == 0 && removals.Count == 0)
             {
-                state.LastCatalogEtag = newEtag;
                 var catalogIds = new HashSet<int>(catalogModGroups.Keys);
                 state.SkippedMods.IntersectWith(catalogIds);
                 state.Save();
                 _log.LogInfo("All mods up to date");
                 SendReport("up_to_date", state.Mods, null);
-                return null;
+                return new SyncPlan { Catalog = catalog, ServerUrl = serverUrl, State = state };
             }
 
             if (installs.Count > 0 || updates.Count > 0)
@@ -242,7 +237,6 @@ namespace Convoy
                 State = state,
                 WantedMods = wantedMods,
                 SkippableMods = skippedWanted,
-                NewEtag = newEtag,
                 ServerUrl = serverUrl,
                 Installs = installs,
                 Updates = updates,
@@ -365,7 +359,6 @@ namespace Convoy
             skippedModIds.IntersectWith(catalogIds);
 
             state.ServerUrl = plan.ServerUrl;
-            state.LastCatalogEtag = plan.NewEtag;
             state.Mods = newMods;
             state.SkippedMods = skippedModIds;
             state.Save();
@@ -386,31 +379,17 @@ namespace Convoy
         private const int MinBitrateBytes = 10 * 1024; // 10 KB/s
         private const int StallWindowSeconds = 15;
 
-        private (Catalog?, string?) FetchCatalog(string serverUrl, string? lastEtag)
+        private Catalog FetchCatalog(string serverUrl)
         {
             var request = WebRequest.CreateHttp($"{serverUrl}/quma/convoy/catalog");
             request.Timeout = CatalogTimeoutMs;
-            if (lastEtag != null)
-                request.Headers["If-None-Match"] = lastEtag;
 
-            HttpWebResponse response;
-            try
-            {
-                response = (HttpWebResponse)request.GetResponse();
-            }
-            catch (WebException ex)
-                when (ex.Response is HttpWebResponse r && r.StatusCode == HttpStatusCode.NotModified)
-            {
-                return (null, lastEtag);
-            }
-
-            using (response)
+            using (var response = (HttpWebResponse)request.GetResponse())
             using (var reader = new StreamReader(response.GetResponseStream()!))
             {
                 var json = reader.ReadToEnd();
-                var catalog = JsonConvert.DeserializeObject<Catalog>(json)
-                              ?? throw new InvalidOperationException("Server returned invalid catalog JSON");
-                return (catalog, response.Headers["ETag"]);
+                return JsonConvert.DeserializeObject<Catalog>(json)
+                       ?? throw new InvalidOperationException("Server returned invalid catalog JSON");
             }
         }
 

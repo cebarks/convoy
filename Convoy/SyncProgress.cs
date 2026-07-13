@@ -2,6 +2,15 @@ using System.Threading;
 
 namespace Convoy
 {
+    public class SyncOutcome
+    {
+        public SyncResult Result;
+        public string? Error;
+        public string? SptVersion;
+        public string? QuartermasterVersion;
+        public string? ServerUrl;
+    }
+
     public class SyncProgress
     {
         private volatile string _phase = "Initializing...";

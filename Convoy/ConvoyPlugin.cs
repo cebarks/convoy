@@ -12,6 +12,7 @@ namespace Convoy
     {
         private enum PluginState { Idle, Planning, AwaitingConfirmation, Executing, Complete }
 
+        private ConvoyConfig? _config;
         private SyncEngine? _engine;
         private PluginState _state = PluginState.Idle;
 
@@ -51,9 +52,10 @@ namespace Convoy
 
         private void Awake()
         {
-            var config = new ConvoyConfig(Config);
-            config.RegisterCachedGroups(ConvoyState.Load().OptionalGroups);
-            _engine = new SyncEngine(Logger, config);
+            _config = new ConvoyConfig(Config);
+            _config.RegisterCachedGroups(ConvoyState.Load().OptionalGroups);
+            _config.RegisterDebugEntries();
+            _engine = new SyncEngine(Logger, _config);
             StartPlanning();
         }
 
@@ -97,17 +99,21 @@ namespace Convoy
                     {
                         if (_planProgress.Result == SyncResult.Failed)
                         {
+                            UpdateDebugState(SyncResult.Failed, _planProgress.Error, _pendingPlan);
                             ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
                             _state = PluginState.Complete;
                         }
-                        else if (_pendingPlan == null)
+                        else if (_pendingPlan == null ||
+                                 (_pendingPlan.Installs.Count == 0 && _pendingPlan.Updates.Count == 0 && _pendingPlan.Removals.Count == 0))
                         {
+                            UpdateDebugState(SyncResult.UpToDate, null, _pendingPlan);
                             ShowStatus("Convoy: mods up to date", Color.green, 5f);
                             _state = PluginState.Complete;
                         }
                         else
                         {
                             _plan = _pendingPlan;
+                            UpdateDebugState(SyncResult.UpToDate, null, _plan);
                             InitConfirmationUI(_plan);
                             _state = PluginState.AwaitingConfirmation;
                         }
@@ -132,6 +138,7 @@ namespace Convoy
                                 ShowStatus("Convoy: mods up to date", Color.green, 5f);
                                 break;
                         }
+                        UpdateDebugState(_execProgress.Result ?? SyncResult.UpToDate, _execProgress.Error, _plan);
                         _execThread = null;
                         _execProgress = null;
                         _plan = null;
@@ -139,6 +146,33 @@ namespace Convoy
                     }
                     break;
             }
+
+            if (_config?.SyncNow != null && _config.SyncNow.Value)
+            {
+                _config.SyncNow.Value = false;
+                if (_state == PluginState.Planning || _state == PluginState.Executing)
+                {
+                    Logger.LogWarning("Convoy: sync already in progress, ignoring manual trigger");
+                }
+                else
+                {
+                    Logger.LogInfo("Convoy: manual sync triggered");
+                    StartPlanning();
+                }
+            }
+        }
+
+        private void UpdateDebugState(SyncResult result, string? error = null, SyncPlan? plan = null)
+        {
+            if (_config == null) return;
+            _config.UpdateDebugState(new SyncOutcome
+            {
+                Result = result,
+                Error = error,
+                SptVersion = plan?.Catalog.SptVersion,
+                QuartermasterVersion = plan?.Catalog.QuartermasterVersion,
+                ServerUrl = plan?.ServerUrl
+            });
         }
 
         private void InitConfirmationUI(SyncPlan plan)
