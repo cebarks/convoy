@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using UnityEngine;
 
 namespace BepInEx
 {
@@ -55,5 +56,12 @@ namespace BepInEx.Configuration
     public class ConfigEntry<T>
     {
         public T Value { get; set; } = default!;
+    }
+
+    public struct KeyboardShortcut
+    {
+        public KeyboardShortcut(KeyCode mainKey, params KeyCode[] modifiers) { }
+        public bool IsDown() => false;
+        public static readonly KeyboardShortcut Empty = new KeyboardShortcut();
     }
 }

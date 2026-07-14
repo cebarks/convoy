@@ -136,7 +136,7 @@ namespace Convoy
             foreach (var group in catalog.Groups)
             {
                 bool isRequired = group.Tier == "required";
-                if (!isRequired && !_config.IsGroupEnabled(group.Slug))
+                if (!isRequired && !state.EnabledGroups.Contains(group.Slug))
                     continue;
 
                 foreach (var mod in group.Mods)
