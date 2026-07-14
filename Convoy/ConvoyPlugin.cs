@@ -53,7 +53,6 @@ namespace Convoy
         private void Awake()
         {
             _config = new ConvoyConfig(Config);
-            _config.RegisterCachedGroups(ConvoyState.Load().OptionalGroups);
             _config.RegisterDebugEntries();
             _engine = new SyncEngine(Logger, _config);
             StartPlanning();
