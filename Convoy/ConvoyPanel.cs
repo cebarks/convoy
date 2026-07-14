@@ -75,6 +75,7 @@ namespace Convoy
         public void UpdateState(ConvoyState state)
         {
             _state = state;
+            _modsDirty = false;
             RebuildModChecks();
         }
 
