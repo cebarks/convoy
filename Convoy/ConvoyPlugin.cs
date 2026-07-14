@@ -14,6 +14,7 @@ namespace Convoy
 
         private ConvoyConfig? _config;
         private SyncEngine? _engine;
+        private ConvoyPanel? _panel;
         private PluginState _state = PluginState.Idle;
 
         // Planning phase
@@ -55,6 +56,13 @@ namespace Convoy
             _config = new ConvoyConfig(Config);
             _config.RegisterDebugEntries();
             _engine = new SyncEngine(Logger, _config);
+            _panel = new ConvoyPanel(
+                _config.PanelKeybind!,
+                () => StartPlanning(),
+                () => _state == PluginState.Planning || _state == PluginState.Executing,
+                () => false // ponytail: in-raid detection, always allow for now — see spec
+            );
+            _panel.UpdateState(ConvoyState.Load());
             StartPlanning();
         }
 
@@ -91,6 +99,11 @@ namespace Convoy
 
         private void Update()
         {
+            // Suppress keybind while confirmation panel is showing
+            if (_state != PluginState.AwaitingConfirmation)
+                _panel?.HandleKeybind();
+            _panel?.FlushIfDirty();
+
             switch (_state)
             {
                 case PluginState.Planning:
@@ -98,7 +111,15 @@ namespace Convoy
                     {
                         if (_planProgress.Result == SyncResult.Failed)
                         {
+                            var outcome = new SyncOutcome { Result = SyncResult.Failed, Error = _planProgress.Error };
+                            if (_pendingPlan != null)
+                            {
+                                outcome.SptVersion = _pendingPlan.Catalog.SptVersion;
+                                outcome.QuartermasterVersion = _pendingPlan.Catalog.QuartermasterVersion;
+                                outcome.ServerUrl = _pendingPlan.ServerUrl;
+                            }
                             UpdateDebugState(SyncResult.Failed, _planProgress.Error, _pendingPlan);
+                            _panel?.UpdateOutcome(outcome);
                             ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
                             _state = PluginState.Complete;
                         }
@@ -106,6 +127,16 @@ namespace Convoy
                                  (_pendingPlan.Installs.Count == 0 && _pendingPlan.Updates.Count == 0 && _pendingPlan.Removals.Count == 0))
                         {
                             UpdateDebugState(SyncResult.UpToDate, null, _pendingPlan);
+                            var outcome = new SyncOutcome { Result = SyncResult.UpToDate };
+                            if (_pendingPlan != null)
+                            {
+                                outcome.SptVersion = _pendingPlan.Catalog.SptVersion;
+                                outcome.QuartermasterVersion = _pendingPlan.Catalog.QuartermasterVersion;
+                                outcome.ServerUrl = _pendingPlan.ServerUrl;
+                                _panel?.UpdateCatalog(_pendingPlan.Catalog);
+                            }
+                            _panel?.UpdateOutcome(outcome);
+                            _panel?.UpdateState(ConvoyState.Load());
                             ShowStatus("Convoy: mods up to date", Color.green, 5f);
                             _state = PluginState.Complete;
                         }
@@ -113,6 +144,8 @@ namespace Convoy
                         {
                             _plan = _pendingPlan;
                             UpdateDebugState(SyncResult.UpToDate, null, _plan);
+                            _panel?.UpdateCatalog(_plan.Catalog);
+                            _panel?.Close();
                             InitConfirmationUI(_plan);
                             _state = PluginState.AwaitingConfirmation;
                         }
@@ -125,6 +158,20 @@ namespace Convoy
                 case PluginState.Executing:
                     if (_execProgress != null && _execProgress.IsComplete)
                     {
+                        var outcome = new SyncOutcome
+                        {
+                            Result = _execProgress.Result ?? SyncResult.UpToDate,
+                            Error = _execProgress.Error
+                        };
+                        if (_plan != null)
+                        {
+                            outcome.SptVersion = _plan.Catalog.SptVersion;
+                            outcome.QuartermasterVersion = _plan.Catalog.QuartermasterVersion;
+                            outcome.ServerUrl = _plan.ServerUrl;
+                        }
+                        _panel?.UpdateOutcome(outcome);
+                        _panel?.UpdateState(ConvoyState.Load());
+
                         switch (_execProgress.Result)
                         {
                             case SyncResult.Failed:
@@ -207,7 +254,6 @@ namespace Convoy
                     confirmedModIds.Add(kvp.Key);
             }
 
-            // Preserve existing skips for mods not shown in UI, apply UI changes on top
             var skippedModIds = new HashSet<int>(plan.State.SkippedMods);
             foreach (var kvp in _modChecked)
             {
@@ -274,6 +320,12 @@ namespace Convoy
                 DrawConfirmationPanel();
                 return;
             }
+
+            // Draw the keybind panel (handles its own open/closed state)
+            _panel?.DrawPanel();
+
+            // Don't draw status overlay on top of the panel
+            if (_panel != null && _panel.IsOpen) return;
 
             string? text = null;
             Color color = Color.green;
