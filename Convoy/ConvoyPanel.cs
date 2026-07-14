@@ -46,6 +46,10 @@ namespace Convoy
         private GUIStyle? _tabActiveStyle;
         private GUIStyle? _infoStyle;
         private GUIStyle? _infoValueStyle;
+        private GUIStyle? _dirtyStyle;
+        private GUIStyle? _greenValueStyle;
+        private GUIStyle? _yellowValueStyle;
+        private GUIStyle? _redValueStyle;
 
         private const float PanelWidth = 500f;
         private const float PanelMaxHeight = 600f;
@@ -161,6 +165,14 @@ namespace Convoy
                 fontSize = 13,
                 normal = { textColor = new Color(0.9f, 0.9f, 0.9f, 1f) }
             };
+            _dirtyStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 13,
+                normal = { textColor = Color.yellow }
+            };
+            _greenValueStyle = new GUIStyle(_infoValueStyle) { normal = { textColor = Color.green } };
+            _yellowValueStyle = new GUIStyle(_infoValueStyle) { normal = { textColor = Color.yellow } };
+            _redValueStyle = new GUIStyle(_infoValueStyle) { normal = { textColor = Color.red } };
         }
 
         public void DrawPanel()
@@ -215,38 +227,48 @@ namespace Convoy
             }
         }
 
+        private GUIStyle StatusValueStyle(SyncResult? result)
+        {
+            switch (result)
+            {
+                case SyncResult.UpToDate: return _greenValueStyle!;
+                case SyncResult.RestartRequired: return _yellowValueStyle!;
+                case SyncResult.Failed: return _redValueStyle!;
+                default: return _infoValueStyle!;
+            }
+        }
+
         private void DrawStatusTab(float panelX, float top, float height)
         {
             float innerWidth = PanelWidth - Padding * 2;
             float y = 0f;
 
-            // Header info
-            float headerHeight = 0f;
-            var lines = new List<(string label, string value, Color color)>();
+            // Header info lines: (label, value, style)
+            var lines = new List<(string label, string value, GUIStyle style)>();
 
-            lines.Add(("Convoy", VersionInfo.Version, Color.white));
+            lines.Add(("Convoy", VersionInfo.Version, _infoValueStyle!));
             if (_outcome?.QuartermasterVersion != null)
-                lines.Add(("Quartermaster", _outcome.QuartermasterVersion, Color.white));
+                lines.Add(("Quartermaster", _outcome.QuartermasterVersion, _infoValueStyle!));
             if (_outcome?.SptVersion != null)
-                lines.Add(("SPT", _outcome.SptVersion, Color.white));
+                lines.Add(("SPT", _outcome.SptVersion, _infoValueStyle!));
             if (_outcome?.ServerUrl != null)
-                lines.Add(("Server", _outcome.ServerUrl, Color.white));
+                lines.Add(("Server", _outcome.ServerUrl, _infoValueStyle!));
 
             if (_outcome != null)
             {
-                var (label, color) = _outcome.Result switch
+                var statusLabel = _outcome.Result switch
                 {
-                    SyncResult.UpToDate => ("Up to date", Color.green),
-                    SyncResult.RestartRequired => ("Updated — restart required", Color.yellow),
-                    SyncResult.Failed => ("Failed", Color.red),
-                    _ => ("Unknown", Color.white)
+                    SyncResult.UpToDate => "Up to date",
+                    SyncResult.RestartRequired => "Updated — restart required",
+                    SyncResult.Failed => "Failed",
+                    _ => "Unknown"
                 };
-                lines.Add(("Last Sync", label, color));
+                lines.Add(("Last Sync", statusLabel, StatusValueStyle(_outcome.Result)));
                 if (_outcome.Result == SyncResult.Failed && !string.IsNullOrEmpty(_outcome.Error))
-                    lines.Add(("Error", _outcome.Error!, Color.red));
+                    lines.Add(("Error", _outcome.Error!, _redValueStyle!));
             }
 
-            headerHeight = lines.Count * LineHeight + 8f;
+            float headerHeight = lines.Count * LineHeight + 8f;
 
             // Mod listing
             float modListHeight = CalculateModListHeight();
@@ -257,11 +279,10 @@ namespace Convoy
             _statusScroll = GUI.BeginScrollView(scrollRect, _statusScroll, contentRect);
 
             float labelWidth = 120f;
-            foreach (var (label, value, color) in lines)
+            foreach (var (label, value, style) in lines)
             {
                 GUI.Label(new Rect(0, y, labelWidth, LineHeight), label, _infoStyle!);
-                var valueStyle = new GUIStyle(_infoValueStyle!) { normal = { textColor = color } };
-                GUI.Label(new Rect(labelWidth, y, innerWidth - labelWidth - 20f, LineHeight), value, valueStyle);
+                GUI.Label(new Rect(labelWidth, y, innerWidth - labelWidth - 20f, LineHeight), value, style);
                 y += LineHeight;
             }
             y += 8f;
@@ -287,9 +308,8 @@ namespace Convoy
 
             if (_modsDirty)
             {
-                var dirtyStyle = new GUIStyle(_infoStyle!) { normal = { textColor = Color.yellow } };
                 GUI.Label(new Rect(panelX + Padding, top, innerWidth, LineHeight),
-                    "Changes pending — sync to apply", dirtyStyle);
+                    "Changes pending — sync to apply", _dirtyStyle!);
                 top += LineHeight;
                 height -= LineHeight;
             }
@@ -438,15 +458,15 @@ namespace Convoy
 
             if (inRaid) return;
 
-            var label = syncing ? "Syncing..." : "Sync Now";
-            if (!syncing && GUI.Button(new Rect(buttonX, top + 8f, buttonWidth, 32f), label))
+            if (syncing)
+            {
+                GUI.Label(new Rect(buttonX, top + 8f, buttonWidth, 32f), "Syncing...", _tabStyle!);
+            }
+            else if (GUI.Button(new Rect(buttonX, top + 8f, buttonWidth, 32f), "Sync Now"))
             {
                 _onSyncRequested();
                 _modsDirty = false;
             }
-
-            if (syncing)
-                GUI.Label(new Rect(buttonX, top + 8f, buttonWidth, 32f), label, _tabStyle!);
         }
 
         private float CalculateModListHeight()

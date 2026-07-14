@@ -254,6 +254,7 @@ namespace Convoy
                     confirmedModIds.Add(kvp.Key);
             }
 
+            // Preserve existing skips for mods not shown in UI, apply UI changes on top
             var skippedModIds = new HashSet<int>(plan.State.SkippedMods);
             foreach (var kvp in _modChecked)
             {
