@@ -54,7 +54,6 @@ namespace Convoy
         private void Awake()
         {
             _config = new ConvoyConfig(Config);
-            _config.RegisterDebugEntries();
             _engine = new SyncEngine(Logger, _config);
             _panel = new ConvoyPanel(
                 _config.PanelKeybind!,
@@ -118,7 +117,6 @@ namespace Convoy
                                 outcome.QuartermasterVersion = _pendingPlan.Catalog.QuartermasterVersion;
                                 outcome.ServerUrl = _pendingPlan.ServerUrl;
                             }
-                            UpdateDebugState(SyncResult.Failed, _planProgress.Error, _pendingPlan);
                             _panel?.UpdateOutcome(outcome);
                             ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
                             _state = PluginState.Complete;
@@ -126,7 +124,6 @@ namespace Convoy
                         else if (_pendingPlan == null ||
                                  (_pendingPlan.Installs.Count == 0 && _pendingPlan.Updates.Count == 0 && _pendingPlan.Removals.Count == 0))
                         {
-                            UpdateDebugState(SyncResult.UpToDate, null, _pendingPlan);
                             var outcome = new SyncOutcome { Result = SyncResult.UpToDate };
                             if (_pendingPlan != null)
                             {
@@ -143,7 +140,6 @@ namespace Convoy
                         else
                         {
                             _plan = _pendingPlan;
-                            UpdateDebugState(SyncResult.UpToDate, null, _plan);
                             _panel?.UpdateCatalog(_plan.Catalog);
                             _panel?.Close();
                             InitConfirmationUI(_plan);
@@ -184,7 +180,6 @@ namespace Convoy
                                 ShowStatus("Convoy: mods up to date", Color.green, 5f);
                                 break;
                         }
-                        UpdateDebugState(_execProgress.Result ?? SyncResult.UpToDate, _execProgress.Error, _plan);
                         _execThread = null;
                         _execProgress = null;
                         _plan = null;
@@ -193,32 +188,6 @@ namespace Convoy
                     break;
             }
 
-            if (_config?.SyncNow != null && _config.SyncNow.Value)
-            {
-                _config.SyncNow.Value = false;
-                if (_state == PluginState.Planning || _state == PluginState.Executing)
-                {
-                    Logger.LogWarning("Convoy: sync already in progress, ignoring manual trigger");
-                }
-                else
-                {
-                    Logger.LogInfo("Convoy: manual sync triggered");
-                    StartPlanning();
-                }
-            }
-        }
-
-        private void UpdateDebugState(SyncResult result, string? error = null, SyncPlan? plan = null)
-        {
-            if (_config == null) return;
-            _config.UpdateDebugState(new SyncOutcome
-            {
-                Result = result,
-                Error = error,
-                SptVersion = plan?.Catalog.SptVersion,
-                QuartermasterVersion = plan?.Catalog.QuartermasterVersion,
-                ServerUrl = plan?.ServerUrl
-            });
         }
 
         private void InitConfirmationUI(SyncPlan plan)

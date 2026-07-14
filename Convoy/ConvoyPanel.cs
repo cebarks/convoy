@@ -213,13 +213,14 @@ namespace Convoy
             y += TabHeight + 8f;
 
             float contentTop = y;
-            float buttonAreaHeight = _activeTab == Tab.Mods ? 48f : 0f;
+            float buttonAreaHeight = 48f;
             float contentHeight = panelY + panelHeight - contentTop - Padding - buttonAreaHeight;
 
             switch (_activeTab)
             {
                 case Tab.Status:
                     DrawStatusTab(panelX, contentTop, contentHeight);
+                    DrawSyncButton(panelX, contentTop + contentHeight);
                     break;
                 case Tab.Mods:
                     DrawModsTab(panelX, contentTop, contentHeight);
@@ -367,29 +368,48 @@ namespace Convoy
             if (_catalog == null) return;
             float y = 0f;
 
-            foreach (var group in _catalog.Groups.OrderBy(g => g.Tier == "required" ? 0 : 1).ThenBy(g => g.Name))
+            var requiredGroups = _catalog.Groups.Where(g => g.Tier == "required").OrderBy(g => g.Name).ToList();
+            var optionalGroups = _catalog.Groups.Where(g => g.Tier != "required").OrderBy(g => g.Name).ToList();
+
+            if (requiredGroups.Count > 0)
+                y = DrawModsSection(y, width, "__section_required", "Required", requiredGroups, inRaid);
+
+            if (optionalGroups.Count > 0)
+                y = DrawModsSection(y, width, "__section_optional", "Optional", optionalGroups, inRaid);
+        }
+
+        private float DrawModsSection(float y, float width, string sectionKey, string sectionLabel, List<CatalogGroup> groups, bool inRaid)
+        {
+            bool sectionCollapsed = _groupCollapsed.ContainsKey(sectionKey) && _groupCollapsed[sectionKey];
+            var sectionArrow = sectionCollapsed ? "▸" : "▾";
+
+            if (GUI.Button(new Rect(0, y, width, LineHeight), $"{sectionArrow}  {sectionLabel}", _titleStyle!))
+                _groupCollapsed[sectionKey] = !sectionCollapsed;
+            y += LineHeight + 2f;
+
+            if (sectionCollapsed) return y;
+
+            foreach (var group in groups)
             {
                 bool isRequired = group.Tier == "required";
                 var slug = group.Slug;
                 bool collapsed = _groupCollapsed.ContainsKey(slug) && _groupCollapsed[slug];
                 var arrow = collapsed ? "▸" : "▾";
-                var tierLabel = isRequired ? "(required)" : "(optional)";
 
-                // Collapse arrow (clickable for all group types)
-                if (GUI.Button(new Rect(0, y, IndentWidth, LineHeight), arrow, _headerStyle!))
+                if (GUI.Button(new Rect(IndentWidth, y, IndentWidth, LineHeight), arrow, _headerStyle!))
                     _groupCollapsed[slug] = !collapsed;
 
                 if (isRequired)
                 {
-                    GUI.Label(new Rect(IndentWidth, y, width - IndentWidth, LineHeight),
-                        $"{group.Name}  {tierLabel}", _headerStyle!);
+                    GUI.Label(new Rect(IndentWidth * 2, y, width - IndentWidth * 2, LineHeight),
+                        group.Name, _headerStyle!);
                 }
                 else
                 {
                     bool groupEnabled = _state.EnabledGroups.Contains(slug);
                     bool newGroupEnabled = inRaid ? groupEnabled :
-                        GUI.Toggle(new Rect(IndentWidth, y, width - IndentWidth, LineHeight), groupEnabled,
-                            $" {group.Name}  {tierLabel}");
+                        GUI.Toggle(new Rect(IndentWidth * 2, y, width - IndentWidth * 2, LineHeight), groupEnabled,
+                            $" {group.Name}");
                     if (newGroupEnabled != groupEnabled && !inRaid)
                     {
                         if (newGroupEnabled)
@@ -409,7 +429,7 @@ namespace Convoy
                     {
                         if (isRequired)
                         {
-                            GUI.Label(new Rect(IndentWidth, y, width - IndentWidth, LineHeight),
+                            GUI.Label(new Rect(IndentWidth * 2, y, width - IndentWidth * 2, LineHeight),
                                 $"{mod.Name} v{mod.Version}", _modStyle!);
                         }
                         else
@@ -418,18 +438,18 @@ namespace Convoy
                             bool enabled = _state.EnabledGroups.Contains(slug);
                             if (!enabled)
                             {
-                                GUI.Label(new Rect(IndentWidth, y, width - IndentWidth, LineHeight),
+                                GUI.Label(new Rect(IndentWidth * 2, y, width - IndentWidth * 2, LineHeight),
                                     $"{mod.Name} v{mod.Version}", _modStyle!);
                             }
                             else if (inRaid)
                             {
-                                GUI.Toggle(new Rect(IndentWidth, y, width - IndentWidth, LineHeight),
+                                GUI.Toggle(new Rect(IndentWidth * 2, y, width - IndentWidth * 2, LineHeight),
                                     isChecked, $" {mod.Name} v{mod.Version}");
                             }
                             else
                             {
                                 bool newChecked = GUI.Toggle(
-                                    new Rect(IndentWidth, y, width - IndentWidth, LineHeight),
+                                    new Rect(IndentWidth * 2, y, width - IndentWidth * 2, LineHeight),
                                     isChecked, $" {mod.Name} v{mod.Version}");
                                 if (newChecked != isChecked)
                                 {
@@ -448,6 +468,7 @@ namespace Convoy
                 }
                 y += 4f;
             }
+            return y;
         }
 
         private void DrawSyncButton(float panelX, float top)
@@ -493,7 +514,25 @@ namespace Convoy
         {
             if (_catalog == null) return 0f;
             float height = 0f;
-            foreach (var group in _catalog.Groups)
+
+            var requiredGroups = _catalog.Groups.Where(g => g.Tier == "required").ToList();
+            var optionalGroups = _catalog.Groups.Where(g => g.Tier != "required").ToList();
+
+            if (requiredGroups.Count > 0)
+                height += CalculateSectionHeight("__section_required", requiredGroups);
+            if (optionalGroups.Count > 0)
+                height += CalculateSectionHeight("__section_optional", optionalGroups);
+
+            return height;
+        }
+
+        private float CalculateSectionHeight(string sectionKey, List<CatalogGroup> groups)
+        {
+            float height = LineHeight + 2f; // section header
+            if (_groupCollapsed.ContainsKey(sectionKey) && _groupCollapsed[sectionKey])
+                return height;
+
+            foreach (var group in groups)
             {
                 height += LineHeight;
                 var slug = group.Slug;
