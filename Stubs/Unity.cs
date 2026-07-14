@@ -76,4 +76,20 @@ namespace UnityEngine
         public static Vector2 BeginScrollView(Rect position, Vector2 scrollPosition, Rect viewRect) => scrollPosition;
         public static void EndScrollView() { }
     }
+
+    public enum KeyCode
+    {
+        None = 0,
+        Alpha0 = 48, Alpha1, Alpha2, Alpha3, Alpha4, Alpha5, Alpha6, Alpha7, Alpha8, Alpha9,
+        F1 = 282, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+        LeftControl = 306, RightControl = 305,
+        LeftShift = 304, RightShift = 303,
+        LeftAlt = 308, RightAlt = 307,
+        Home = 278
+    }
+
+    public static class Input
+    {
+        public static bool GetKeyDown(KeyCode key) => false;
+    }
 }
