@@ -82,12 +82,10 @@ namespace Convoy
         public Catalog Catalog = new Catalog();
         public ConvoyState State = new ConvoyState();
         public Dictionary<int, CatalogMod> WantedMods = new Dictionary<int, CatalogMod>();
-        public Dictionary<int, CatalogMod> SkippableMods = new Dictionary<int, CatalogMod>();
         public string ServerUrl = "";
         public List<PlannedMod> Installs = new List<PlannedMod>();
         public List<PlannedMod> Updates = new List<PlannedMod>();
         public List<PlannedMod> Removals = new List<PlannedMod>();
-        public List<PlannedMod> Skipped = new List<PlannedMod>();
         public HashSet<string> Exclusions = new HashSet<string>();
     }
 
@@ -132,7 +130,6 @@ namespace Convoy
                     catalogModGroups[mod.Id] = (mod, group);
 
             var wantedMods = new Dictionary<int, CatalogMod>();
-            var skippedWanted = new Dictionary<int, CatalogMod>();
             foreach (var group in catalog.Groups)
             {
                 bool isRequired = group.Tier == "required";
@@ -142,9 +139,8 @@ namespace Convoy
                 foreach (var mod in group.Mods)
                 {
                     if (!isRequired && state.SkippedMods.Contains(mod.Id))
-                        skippedWanted[mod.Id] = mod;
-                    else
-                        wantedMods[mod.Id] = mod;
+                        continue;
+                    wantedMods[mod.Id] = mod;
                 }
             }
 
@@ -177,7 +173,6 @@ namespace Convoy
             }
 
             var allKeptIds = new HashSet<int>(wantedMods.Keys);
-            allKeptIds.UnionWith(skippedWanted.Keys);
             var removals = new List<PlannedMod>();
             foreach (var id in currentMods.Keys.Where(id => !allKeptIds.Contains(id)))
             {
@@ -192,22 +187,6 @@ namespace Convoy
                     GroupSlug = hasInfo ? info.group.Slug : "",
                     IsRequired = false
                 });
-            }
-
-            var skippedPlan = new List<PlannedMod>();
-            foreach (var kvp in skippedWanted)
-            {
-                var (mod, group) = catalogModGroups[kvp.Key];
-                if (!currentMods.TryGetValue(kvp.Key, out var current) || current.Version != mod.Version)
-                {
-                    skippedPlan.Add(new PlannedMod
-                    {
-                        Id = mod.Id, Name = mod.Name, Version = mod.Version,
-                        OldVersion = current?.Version,
-                        GroupName = group.Name, GroupSlug = group.Slug,
-                        IsRequired = false
-                    });
-                }
             }
 
             if (installs.Count == 0 && updates.Count == 0 && removals.Count == 0)
@@ -236,12 +215,10 @@ namespace Convoy
                 Catalog = catalog,
                 State = state,
                 WantedMods = wantedMods,
-                SkippableMods = skippedWanted,
                 ServerUrl = serverUrl,
                 Installs = installs,
                 Updates = updates,
                 Removals = removals,
-                Skipped = skippedPlan,
                 Exclusions = new HashSet<string>(catalog.Exclusions)
             };
         }
@@ -253,8 +230,6 @@ namespace Convoy
             var confirmedSet = new HashSet<int>(confirmedModIds);
 
             var allEligible = new Dictionary<int, CatalogMod>(plan.WantedMods);
-            foreach (var kv in plan.SkippableMods)
-                allEligible[kv.Key] = kv.Value;
 
             foreach (var modId in confirmedModIds)
             {
@@ -339,7 +314,7 @@ namespace Convoy
             {
                 if (removeIds.Contains(kv.Key)) continue;
 
-                if (skippedModIds.Contains(kv.Key))
+                if (!confirmedSet.Contains(kv.Key))
                 {
                     if (currentMods.TryGetValue(kv.Key, out var existing))
                         newMods.Add(existing);
