@@ -11,15 +11,7 @@
         <DefineConstants>$(DefineConstants);DEBUG;TRACE</DefineConstants>
     </PropertyGroup>
 
-    <!-- CI: compile against stubs (no copyrighted DLLs needed) -->
-    <ItemGroup Condition="'$(UseStubs)' == 'true'">
-        <Reference Include="System.IO.Compression"/>
-        <ProjectReference Include="..\Stubs\Stubs.csproj" />
-        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    </ItemGroup>
-
-    <!-- Local dev: compile against real game DLLs -->
-    <ItemGroup Condition="'$(UseStubs)' != 'true'">
+    <ItemGroup>
         <Reference Include="System.IO.Compression"/>
         <Reference Include="BepInEx">
             <HintPath>$(TarkovBepInExCoreDir)BepInEx.dll</HintPath>
