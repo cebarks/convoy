@@ -10,7 +10,7 @@ namespace Convoy
     [BepInPlugin("io.cebarks.convoy", "Convoy", VersionInfo.Version)]
     public class ConvoyPlugin : BaseUnityPlugin
     {
-        private enum PluginState { Idle, Planning, AwaitingConfirmation, Executing, Complete }
+        private enum PluginState { Idle, Planning, AwaitingConfirmation, Executing, RestartRequired, Complete }
 
         private ConvoyConfig? _config;
         private SyncEngine? _engine;
@@ -99,7 +99,7 @@ namespace Convoy
         private void Update()
         {
             // Suppress keybind while confirmation panel is showing
-            if (_state != PluginState.AwaitingConfirmation)
+            if (_state != PluginState.AwaitingConfirmation && _state != PluginState.RestartRequired)
                 _panel?.HandleKeybind();
             _panel?.FlushIfDirty();
 
@@ -168,22 +168,24 @@ namespace Convoy
                         _panel?.UpdateOutcome(outcome);
                         _panel?.UpdateState(ConvoyState.Load());
 
-                        switch (_execProgress.Result)
-                        {
-                            case SyncResult.Failed:
-                                ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
-                                break;
-                            case SyncResult.RestartRequired:
-                                ShowStatus("Convoy: mods updated — restart required", Color.yellow, 20f);
-                                break;
-                            default:
-                                ShowStatus("Convoy: mods up to date", Color.green, 5f);
-                                break;
-                        }
                         _execThread = null;
                         _execProgress = null;
                         _plan = null;
-                        _state = PluginState.Complete;
+
+                        switch (outcome.Result)
+                        {
+                            case SyncResult.Failed:
+                                ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
+                                _state = PluginState.Complete;
+                                break;
+                            case SyncResult.RestartRequired:
+                                _state = PluginState.RestartRequired;
+                                break;
+                            default:
+                                ShowStatus("Convoy: mods up to date", Color.green, 5f);
+                                _state = PluginState.Complete;
+                                break;
+                        }
                     }
                     break;
             }
@@ -285,6 +287,12 @@ namespace Convoy
 
         private void OnGUI()
         {
+            if (_state == PluginState.RestartRequired)
+            {
+                DrawRestartPopup();
+                return;
+            }
+
             if (_state == PluginState.AwaitingConfirmation && _plan != null)
             {
                 DrawConfirmationPanel();
@@ -486,6 +494,65 @@ namespace Convoy
 
             if (GUI.Button(new Rect(buttonStartX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 32f), "Skip Sync"))
                 OnSkipSync();
+        }
+
+        private void DrawRestartPopup()
+        {
+            if (_overlayTex == null)
+            {
+                _overlayTex = new Texture2D(1, 1);
+                _overlayTex.SetPixel(0, 0, new Color(0, 0, 0, 0.7f));
+                _overlayTex.Apply();
+            }
+            if (_panelBgTex == null)
+            {
+                _panelBgTex = new Texture2D(1, 1);
+                _panelBgTex.SetPixel(0, 0, new Color(0.15f, 0.15f, 0.15f, 0.95f));
+                _panelBgTex.Apply();
+            }
+
+            GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), _overlayTex);
+
+            const float popupWidth = 400f;
+            const float popupHeight = 160f;
+            float popupX = (Screen.width - popupWidth) / 2f;
+            float popupY = (Screen.height - popupHeight) / 2f;
+
+            GUI.Box(new Rect(popupX, popupY, popupWidth, popupHeight), "",
+                _panelStyle ?? new GUIStyle { normal = { background = _panelBgTex } });
+
+            var titleStyle = _titleStyle ?? new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 20, fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter,
+                normal = { textColor = Color.white }
+            };
+            var msgStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = true,
+                normal = { textColor = new Color(0.85f, 0.85f, 0.85f, 1f) }
+            };
+
+            GUI.Label(new Rect(popupX, popupY + Padding, popupWidth, 30f),
+                "Restart Required", titleStyle);
+            GUI.Label(new Rect(popupX + Padding, popupY + 50f, popupWidth - Padding * 2, 50f),
+                "Mods have been updated. Restart the game for changes to take effect.", msgStyle);
+
+            const float btnWidth = 130f;
+            const float btnSpacing = 20f;
+            float btnY = popupY + popupHeight - 44f;
+            float btnStartX = popupX + (popupWidth - btnWidth * 2 - btnSpacing) / 2f;
+
+            if (GUI.Button(new Rect(btnStartX, btnY, btnWidth, 32f), "Restart Now"))
+                Application.Quit();
+
+            if (GUI.Button(new Rect(btnStartX + btnWidth + btnSpacing, btnY, btnWidth, 32f), "Continue Anyway"))
+            {
+                ShowStatus("Convoy: mods updated — restart required", Color.yellow, 20f);
+                _state = PluginState.Complete;
+            }
         }
 
         private float CalculateContentHeight(SyncPlan plan)
