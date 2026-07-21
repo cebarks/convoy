@@ -17,7 +17,7 @@ namespace Convoy
         private ConvoyPanel? _panel;
         private PluginState _state = PluginState.Idle;
 
-        // Planning phase
+        // Planning phase (only used for panel-triggered re-plans)
         private SyncProgress? _planProgress;
         private Thread? _planThread;
         private volatile SyncPlan? _pendingPlan;
@@ -40,6 +40,7 @@ namespace Convoy
         // Cached IMGUI resources
         private Texture2D? _overlayTex;
         private Texture2D? _panelBgTex;
+        private GUIStyle? _modalWindowStyle;
         private GUIStyle? _panelStyle;
         private GUIStyle? _titleStyle;
         private GUIStyle? _headerStyle;
@@ -50,6 +51,7 @@ namespace Convoy
         private const float LineHeight = 26f;
         private const float Padding = 16f;
         private const float IndentWidth = 28f;
+        private const int ModalId = 0x436F6E76; // unique window ID
 
         private void Awake()
         {
@@ -62,7 +64,61 @@ namespace Convoy
                 () => false // ponytail: in-raid detection, always allow for now — see spec
             );
             _panel.UpdateState(ConvoyState.Load());
-            StartPlanning();
+
+            // Run plan synchronously to block game init until catalog check completes
+            try
+            {
+                var plan = _engine.PlanSync();
+                HandlePlanResult(plan, null);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Convoy plan failed: {ex.Message}");
+                Logger.LogDebug(ex);
+                _engine.SendReport("failed", null, ex.Message);
+                HandlePlanResult(null, ex.Message);
+            }
+        }
+
+        private void HandlePlanResult(SyncPlan? plan, string? error)
+        {
+            if (error != null)
+            {
+                var outcome = new SyncOutcome { Result = SyncResult.Failed, Error = error };
+                if (plan != null)
+                {
+                    outcome.SptVersion = plan.Catalog.SptVersion;
+                    outcome.QuartermasterVersion = plan.Catalog.QuartermasterVersion;
+                    outcome.ServerUrl = plan.ServerUrl;
+                }
+                _panel?.UpdateOutcome(outcome);
+                ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
+                _state = PluginState.Complete;
+            }
+            else if (plan == null ||
+                     (plan.Installs.Count == 0 && plan.Updates.Count == 0 && plan.Removals.Count == 0))
+            {
+                var outcome = new SyncOutcome { Result = SyncResult.UpToDate };
+                if (plan != null)
+                {
+                    outcome.SptVersion = plan.Catalog.SptVersion;
+                    outcome.QuartermasterVersion = plan.Catalog.QuartermasterVersion;
+                    outcome.ServerUrl = plan.ServerUrl;
+                    _panel?.UpdateCatalog(plan.Catalog);
+                }
+                _panel?.UpdateOutcome(outcome);
+                _panel?.UpdateState(ConvoyState.Load());
+                ShowStatus("Convoy: mods up to date", Color.green, 5f);
+                _state = PluginState.Complete;
+            }
+            else
+            {
+                _plan = plan;
+                _panel?.UpdateCatalog(plan.Catalog);
+                _panel?.Close();
+                InitConfirmationUI(plan);
+                _state = PluginState.AwaitingConfirmation;
+            }
         }
 
         private void StartPlanning()
@@ -98,8 +154,9 @@ namespace Convoy
 
         private void Update()
         {
-            // Suppress keybind while confirmation panel is showing
-            if (_state != PluginState.AwaitingConfirmation && _state != PluginState.RestartRequired)
+            // Suppress keybind while a modal overlay is showing
+            if (_state != PluginState.AwaitingConfirmation && _state != PluginState.RestartRequired
+                && _state != PluginState.Planning && _state != PluginState.Executing)
                 _panel?.HandleKeybind();
             _panel?.FlushIfDirty();
 
@@ -108,43 +165,8 @@ namespace Convoy
                 case PluginState.Planning:
                     if (_planProgress != null && _planProgress.IsComplete)
                     {
-                        if (_planProgress.Result == SyncResult.Failed)
-                        {
-                            var outcome = new SyncOutcome { Result = SyncResult.Failed, Error = _planProgress.Error };
-                            if (_pendingPlan != null)
-                            {
-                                outcome.SptVersion = _pendingPlan.Catalog.SptVersion;
-                                outcome.QuartermasterVersion = _pendingPlan.Catalog.QuartermasterVersion;
-                                outcome.ServerUrl = _pendingPlan.ServerUrl;
-                            }
-                            _panel?.UpdateOutcome(outcome);
-                            ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
-                            _state = PluginState.Complete;
-                        }
-                        else if (_pendingPlan == null ||
-                                 (_pendingPlan.Installs.Count == 0 && _pendingPlan.Updates.Count == 0 && _pendingPlan.Removals.Count == 0))
-                        {
-                            var outcome = new SyncOutcome { Result = SyncResult.UpToDate };
-                            if (_pendingPlan != null)
-                            {
-                                outcome.SptVersion = _pendingPlan.Catalog.SptVersion;
-                                outcome.QuartermasterVersion = _pendingPlan.Catalog.QuartermasterVersion;
-                                outcome.ServerUrl = _pendingPlan.ServerUrl;
-                                _panel?.UpdateCatalog(_pendingPlan.Catalog);
-                            }
-                            _panel?.UpdateOutcome(outcome);
-                            _panel?.UpdateState(ConvoyState.Load());
-                            ShowStatus("Convoy: mods up to date", Color.green, 5f);
-                            _state = PluginState.Complete;
-                        }
-                        else
-                        {
-                            _plan = _pendingPlan;
-                            _panel?.UpdateCatalog(_plan.Catalog);
-                            _panel?.Close();
-                            InitConfirmationUI(_plan);
-                            _state = PluginState.AwaitingConfirmation;
-                        }
+                        var error = _planProgress.Result == SyncResult.Failed ? _planProgress.Error : null;
+                        HandlePlanResult(_pendingPlan, error);
                         _planThread = null;
                         _planProgress = null;
                         _pendingPlan = null;
@@ -280,75 +302,8 @@ namespace Convoy
 
         #region OnGUI
 
-        private void OnGUI()
+        private void EnsureStyles()
         {
-            if (_state == PluginState.RestartRequired)
-            {
-                DrawRestartPopup();
-                return;
-            }
-
-            if (_state == PluginState.AwaitingConfirmation && _plan != null)
-            {
-                DrawConfirmationPanel();
-                return;
-            }
-
-            // Draw the keybind panel (handles its own open/closed state)
-            _panel?.DrawPanel();
-
-            // Don't draw status overlay on top of the panel
-            if (_panel != null && _panel.IsOpen) return;
-
-            string? text = null;
-            Color color = Color.green;
-
-            var progress = _state == PluginState.Planning ? _planProgress :
-                           _state == PluginState.Executing ? _execProgress : null;
-
-            if (progress != null && !progress.IsComplete)
-            {
-                text = FormatProgress(progress);
-                color = Color.green;
-            }
-            else if (_statusText != null)
-            {
-                if (Time.realtimeSinceStartup > _statusExpiry)
-                {
-                    _statusText = null;
-                    return;
-                }
-                text = _statusText;
-                color = _statusColor;
-            }
-
-            if (text == null)
-                return;
-
-            var remaining = _statusText != null ? _statusExpiry - Time.realtimeSinceStartup : 999f;
-            var alpha = remaining < 2f ? remaining / 2f : 1f;
-
-            var style = new GUIStyle(GUI.skin.label)
-            {
-                fontSize = 18,
-                fontStyle = FontStyle.Bold,
-                alignment = TextAnchor.UpperLeft,
-                normal = { textColor = new Color(color.r, color.g, color.b, alpha) }
-            };
-
-            var rect = new Rect(12, 12, 800, 40);
-            var shadowStyle = new GUIStyle(style)
-            {
-                normal = { textColor = new Color(0, 0, 0, alpha * 0.8f) }
-            };
-            GUI.Label(new Rect(rect.x + 1, rect.y + 1, rect.width, rect.height), text, shadowStyle);
-            GUI.Label(rect, text, style);
-        }
-
-        private void DrawConfirmationPanel()
-        {
-            var plan = _plan!;
-
             if (_overlayTex == null)
             {
                 _overlayTex = new Texture2D(1, 1);
@@ -361,9 +316,10 @@ namespace Convoy
                 _panelBgTex.SetPixel(0, 0, new Color(0.15f, 0.15f, 0.15f, 0.95f));
                 _panelBgTex.Apply();
             }
-
-            GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), _overlayTex);
-
+            if (_modalWindowStyle == null)
+            {
+                _modalWindowStyle = new GUIStyle { normal = { background = _overlayTex } };
+            }
             if (_panelStyle == null)
             {
                 _panelStyle = new GUIStyle { normal = { background = _panelBgTex } };
@@ -384,6 +340,100 @@ namespace Convoy
                     normal = { textColor = new Color(0.8f, 0.8f, 0.8f, 1f) }
                 };
             }
+        }
+
+        private void OnGUI()
+        {
+            if (_state == PluginState.RestartRequired ||
+                _state == PluginState.AwaitingConfirmation ||
+                _state == PluginState.Planning ||
+                _state == PluginState.Executing)
+            {
+                EnsureStyles();
+                GUI.ModalWindow(ModalId, new Rect(0, 0, Screen.width, Screen.height),
+                    DrawModalContent, "", _modalWindowStyle);
+                return;
+            }
+
+            // Draw the keybind panel (handles its own open/closed state)
+            _panel?.DrawPanel();
+
+            // Don't draw status overlay on top of the panel
+            if (_panel != null && _panel.IsOpen) return;
+
+            if (_statusText != null)
+            {
+                if (Time.realtimeSinceStartup > _statusExpiry)
+                {
+                    _statusText = null;
+                    return;
+                }
+
+                var remaining = _statusExpiry - Time.realtimeSinceStartup;
+                var alpha = remaining < 2f ? remaining / 2f : 1f;
+
+                var style = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 18,
+                    fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.UpperLeft,
+                    normal = { textColor = new Color(_statusColor.r, _statusColor.g, _statusColor.b, alpha) }
+                };
+
+                var rect = new Rect(12, 12, 800, 40);
+                var shadowStyle = new GUIStyle(style)
+                {
+                    normal = { textColor = new Color(0, 0, 0, alpha * 0.8f) }
+                };
+                GUI.Label(new Rect(rect.x + 1, rect.y + 1, rect.width, rect.height), _statusText, shadowStyle);
+                GUI.Label(rect, _statusText, style);
+            }
+        }
+
+        private void DrawModalContent(int windowId)
+        {
+            switch (_state)
+            {
+                case PluginState.Planning:
+                case PluginState.Executing:
+                    DrawSyncProgress();
+                    break;
+                case PluginState.AwaitingConfirmation:
+                    if (_plan != null) DrawConfirmation();
+                    break;
+                case PluginState.RestartRequired:
+                    DrawRestart();
+                    break;
+            }
+        }
+
+        private void DrawSyncProgress()
+        {
+            const float popupWidth = 400f;
+            const float popupHeight = 120f;
+            float popupX = (Screen.width - popupWidth) / 2f;
+            float popupY = (Screen.height - popupHeight) / 2f;
+
+            GUI.Box(new Rect(popupX, popupY, popupWidth, popupHeight), "", _panelStyle);
+            GUI.Label(new Rect(popupX, popupY + Padding, popupWidth, 30f), "Convoy", _titleStyle);
+
+            var msgStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = true,
+                normal = { textColor = new Color(0.85f, 0.85f, 0.85f, 1f) }
+            };
+
+            var progress = _state == PluginState.Planning ? _planProgress : _execProgress;
+            var progressText = progress != null ? FormatProgress(progress) : "Syncing...";
+            GUI.Label(new Rect(popupX + Padding, popupY + 50f, popupWidth - Padding * 2, 50f),
+                progressText, msgStyle);
+        }
+
+        private void DrawConfirmation()
+        {
+            var plan = _plan!;
 
             float contentHeight = CalculateContentHeight(plan);
             float titleHeight = 40f;
@@ -491,37 +541,15 @@ namespace Convoy
                 OnSkipSync();
         }
 
-        private void DrawRestartPopup()
+        private void DrawRestart()
         {
-            if (_overlayTex == null)
-            {
-                _overlayTex = new Texture2D(1, 1);
-                _overlayTex.SetPixel(0, 0, new Color(0, 0, 0, 0.7f));
-                _overlayTex.Apply();
-            }
-            if (_panelBgTex == null)
-            {
-                _panelBgTex = new Texture2D(1, 1);
-                _panelBgTex.SetPixel(0, 0, new Color(0.15f, 0.15f, 0.15f, 0.95f));
-                _panelBgTex.Apply();
-            }
-
-            GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), _overlayTex);
-
             const float popupWidth = 400f;
             const float popupHeight = 160f;
             float popupX = (Screen.width - popupWidth) / 2f;
             float popupY = (Screen.height - popupHeight) / 2f;
 
-            GUI.Box(new Rect(popupX, popupY, popupWidth, popupHeight), "",
-                _panelStyle ?? new GUIStyle { normal = { background = _panelBgTex } });
+            GUI.Box(new Rect(popupX, popupY, popupWidth, popupHeight), "", _panelStyle);
 
-            var titleStyle = _titleStyle ?? new GUIStyle(GUI.skin.label)
-            {
-                fontSize = 20, fontStyle = FontStyle.Bold,
-                alignment = TextAnchor.MiddleCenter,
-                normal = { textColor = Color.white }
-            };
             var msgStyle = new GUIStyle(GUI.skin.label)
             {
                 fontSize = 14,
@@ -531,7 +559,7 @@ namespace Convoy
             };
 
             GUI.Label(new Rect(popupX, popupY + Padding, popupWidth, 30f),
-                "Restart Required", titleStyle);
+                "Restart Required", _titleStyle);
             GUI.Label(new Rect(popupX + Padding, popupY + 50f, popupWidth - Padding * 2, 50f),
                 "Mods have been updated. Restart the game for changes to take effect.", msgStyle);
 

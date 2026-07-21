@@ -29,7 +29,7 @@
             <HintPath>$(TarkovManagedDir)UnityEngine.TextRenderingModule.dll</HintPath>
         </Reference>
         <Reference Include="Newtonsoft.Json">
-            <HintPath>$(TarkovDir)Newtonsoft.Json.dll</HintPath>
+            <HintPath>$(TarkovManagedDir)Newtonsoft.Json.dll</HintPath>
         </Reference>
         <Reference Include="spt-common">
             <HintPath>$(TarkovPluginsSPTDir)spt-common.dll</HintPath>
