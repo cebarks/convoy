@@ -160,7 +160,8 @@ namespace Convoy
                         IsRequired = group.Tier == "required"
                     });
                 }
-                else if (current.Version != mod.Version)
+                else if (current.Version != mod.Version
+                         || current.Files.Any(f => !File.Exists(ResolvePath(f.Path))))
                 {
                     updates.Add(new PlannedMod
                     {
