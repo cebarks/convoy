@@ -196,7 +196,7 @@ namespace Convoy
             _modChecked.Clear();
             _scrollPosition = Vector2.zero;
 
-            var slugs = plan.Installs.Concat(plan.Updates).Concat(plan.Skipped)
+            var slugs = plan.Installs.Concat(plan.Updates)
                 .Select(m => m.GroupSlug).Distinct();
             foreach (var slug in slugs)
                 _groupCollapsed[slug] = false;
@@ -205,8 +205,6 @@ namespace Convoy
 
             foreach (var mod in plan.Installs.Concat(plan.Updates).Where(m => !m.IsRequired))
                 _modChecked[mod.Id] = true;
-            foreach (var mod in plan.Skipped)
-                _modChecked[mod.Id] = false;
         }
 
         private void OnConfirm()
@@ -223,13 +221,10 @@ namespace Convoy
                     confirmedModIds.Add(kvp.Key);
             }
 
-            // Preserve existing skips for mods not shown in UI, apply UI changes on top
             var skippedModIds = new HashSet<int>(plan.State.SkippedMods);
             foreach (var kvp in _modChecked)
             {
-                if (kvp.Value)
-                    skippedModIds.Remove(kvp.Key);
-                else
+                if (!kvp.Value)
                     skippedModIds.Add(kvp.Key);
             }
 
@@ -402,7 +397,7 @@ namespace Convoy
 
             float y = 0;
 
-            var allMods = plan.Installs.Concat(plan.Updates).Concat(plan.Skipped);
+            var allMods = plan.Installs.Concat(plan.Updates);
             var groupedMods = allMods
                 .GroupBy(m => m.GroupSlug)
                 .OrderBy(g => g.First().IsRequired ? 0 : 1)
@@ -491,7 +486,7 @@ namespace Convoy
         private float CalculateContentHeight(SyncPlan plan)
         {
             float height = 0;
-            var allMods = plan.Installs.Concat(plan.Updates).Concat(plan.Skipped);
+            var allMods = plan.Installs.Concat(plan.Updates);
             foreach (var group in allMods.GroupBy(m => m.GroupSlug))
             {
                 height += LineHeight;
