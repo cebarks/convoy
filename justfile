@@ -12,7 +12,7 @@ release:
 # Build and copy plugin to SPT install
 deploy: build
     mkdir -p {{plugin_dir}}
-    cp Build/BepInEx/plugins/Convoy/Convoy.dll {{plugin_dir}}/
+    cp Convoy/bin/Debug/Convoy.dll {{plugin_dir}}/
 
 # Remove build artifacts
 clean:
