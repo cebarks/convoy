@@ -325,6 +325,7 @@ namespace Convoy
 
         private void StartRedownload(bool bundlesOnly)
         {
+            if (_state != PluginState.Complete && _state != PluginState.Idle) return;
             var engine = _engine!;
             var progress = new SyncProgress();
             _execProgress = progress;
