@@ -34,6 +34,9 @@
         <Reference Include="spt-common">
             <HintPath>$(TarkovPluginsSPTDir)spt-common.dll</HintPath>
         </Reference>
+        <Reference Include="0Harmony">
+            <HintPath>$(TarkovBepInExCoreDir)0Harmony.dll</HintPath>
+        </Reference>
     </ItemGroup>
 
     <Target Name="GitVersion" BeforeTargets="CoreCompile">

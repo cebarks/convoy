@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using BepInEx;
+using HarmonyLib;
 using UnityEngine;
 
 namespace Convoy
@@ -10,6 +11,24 @@ namespace Convoy
     [BepInPlugin("io.cebarks.convoy", "Convoy", VersionInfo.Version)]
     public class ConvoyPlugin : BaseUnityPlugin
     {
+        private static readonly ManualResetEventSlim _syncGate = new ManualResetEventSlim(false);
+
+        internal static void SignalSyncGate()
+        {
+            _syncGate.Set();
+        }
+
+        internal static bool IsSyncGateSet => _syncGate.IsSet;
+
+        internal static void WaitForSyncGate()
+        {
+            if (_syncGate.Wait(TimeSpan.FromMinutes(5)))
+                return;
+            // Timeout — log warning, let SPT handle bundles normally
+            BepInEx.Logging.Logger.CreateLogSource("Convoy")
+                .LogWarning("Sync gate timed out after 5 minutes — SPT will download bundles normally");
+        }
+
         private enum PluginState { Idle, Planning, AwaitingConfirmation, Executing, RestartRequired, Complete }
 
         private ConvoyConfig? _config;
@@ -55,6 +74,9 @@ namespace Convoy
 
         private void Awake()
         {
+            var harmony = new Harmony("io.cebarks.convoy");
+            harmony.PatchAll(typeof(ConvoyPlugin).Assembly);
+
             _config = new ConvoyConfig(Config);
             _engine = new SyncEngine(Logger, _config);
             _panel = new ConvoyPanel(
@@ -96,6 +118,7 @@ namespace Convoy
                 _panel?.UpdateOutcome(outcome);
                 ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
                 _state = PluginState.Complete;
+                SignalSyncGate();
             }
             else if (plan == null ||
                      (plan.Installs.Count == 0 && plan.Updates.Count == 0 && plan.Removals.Count == 0))
@@ -112,6 +135,7 @@ namespace Convoy
                 _panel?.UpdateState(ConvoyState.Load());
                 ShowStatus("Convoy: mods up to date", Color.green, 5f);
                 _state = PluginState.Complete;
+                SignalSyncGate();
             }
             else
             {
@@ -201,13 +225,16 @@ namespace Convoy
                             case SyncResult.Failed:
                                 ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
                                 _state = PluginState.Complete;
+                                SignalSyncGate();
                                 break;
                             case SyncResult.RestartRequired:
                                 _state = PluginState.RestartRequired;
+                                SignalSyncGate();
                                 break;
                             default:
                                 ShowStatus("Convoy: mods up to date", Color.green, 5f);
                                 _state = PluginState.Complete;
+                                SignalSyncGate();
                                 break;
                         }
                     }
@@ -263,6 +290,7 @@ namespace Convoy
             ShowStatus("Convoy: sync skipped", Color.yellow, 5f);
             _plan = null;
             _state = PluginState.Complete;
+            SignalSyncGate();
         }
 
         private void StartExecution(List<int> confirmedModIds, HashSet<int> skippedModIds)
@@ -609,6 +637,7 @@ namespace Convoy
             {
                 ShowStatus("Convoy: mods updated — restart required", Color.yellow, 20f);
                 _state = PluginState.Complete;
+                SignalSyncGate();
             }
         }
 
@@ -654,6 +683,18 @@ namespace Convoy
             if (bytes >= 1024)
                 return $"{bytes / 1024.0:F0} KB";
             return $"{bytes} B";
+        }
+    }
+
+    [HarmonyPatch("Diz.Resources.EasyAssets", "Create")]
+    static class EasyAssetsGatePatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        static void Prefix()
+        {
+            if (ConvoyPlugin.IsSyncGateSet) return;
+            ConvoyPlugin.WaitForSyncGate();
         }
     }
 }
