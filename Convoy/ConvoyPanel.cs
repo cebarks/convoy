@@ -12,6 +12,8 @@ namespace Convoy
 
         private readonly ConfigEntry<KeyboardShortcut> _keybind;
         private readonly Action _onSyncRequested;
+        private readonly Action _onRedownloadBundles;
+        private readonly Action _onRedownloadAllMods;
         private readonly Func<bool> _isSyncInProgress;
         private readonly Func<bool> _isInRaid;
 
@@ -63,11 +65,15 @@ namespace Convoy
         public ConvoyPanel(
             ConfigEntry<KeyboardShortcut> keybind,
             Action onSyncRequested,
+            Action onRedownloadBundles,
+            Action onRedownloadAllMods,
             Func<bool> isSyncInProgress,
             Func<bool> isInRaid)
         {
             _keybind = keybind;
             _onSyncRequested = onSyncRequested;
+            _onRedownloadBundles = onRedownloadBundles;
+            _onRedownloadAllMods = onRedownloadAllMods;
             _isSyncInProgress = isSyncInProgress;
             _isInRaid = isInRaid;
         }
@@ -213,7 +219,7 @@ namespace Convoy
             y += TabHeight + 8f;
 
             float contentTop = y;
-            float buttonAreaHeight = 48f;
+            float buttonAreaHeight = 108f;
             float contentHeight = panelY + panelHeight - contentTop - Padding - buttonAreaHeight;
 
             switch (_activeTab)
@@ -473,22 +479,34 @@ namespace Convoy
 
         private void DrawSyncButton(float panelX, float top)
         {
-            float buttonWidth = 140f;
+            float buttonWidth = 180f;
             float buttonX = panelX + (PanelWidth - buttonWidth) / 2f;
             bool inRaid = _isInRaid();
             bool syncing = _isSyncInProgress();
 
             if (inRaid) return;
 
+            float y = top + 8f;
+
             if (syncing)
             {
-                GUI.Label(new Rect(buttonX, top + 8f, buttonWidth, 32f), "Syncing...", _tabStyle!);
+                GUI.Label(new Rect(buttonX, y, buttonWidth, 32f), "Syncing...", _tabStyle!);
+                return;
             }
-            else if (GUI.Button(new Rect(buttonX, top + 8f, buttonWidth, 32f), "Sync Now"))
+
+            if (GUI.Button(new Rect(buttonX, y, buttonWidth, 28f), "Sync Now"))
             {
                 _onSyncRequested();
                 _modsDirty = false;
             }
+            y += 32f;
+
+            if (GUI.Button(new Rect(buttonX, y, buttonWidth, 28f), "Redownload Bundles"))
+                _onRedownloadBundles();
+            y += 32f;
+
+            if (GUI.Button(new Rect(buttonX, y, buttonWidth, 28f), "Redownload All Mods"))
+                _onRedownloadAllMods();
         }
 
         private float CalculateModListHeight()

@@ -60,6 +60,8 @@ namespace Convoy
             _panel = new ConvoyPanel(
                 _config.PanelKeybind!,
                 () => StartPlanning(),
+                () => StartRedownload(bundlesOnly: true),
+                () => StartRedownload(bundlesOnly: false),
                 () => _state == PluginState.Planning || _state == PluginState.Executing,
                 () => false // ponytail: in-raid detection, always allow for now — see spec
             );
@@ -290,6 +292,38 @@ namespace Convoy
                 IsBackground = true
             };
             _execThread.Start();
+            _state = PluginState.Executing;
+        }
+
+        private void StartRedownload(bool bundlesOnly)
+        {
+            var engine = _engine!;
+            var progress = new SyncProgress();
+            _execProgress = progress;
+
+            _execThread = new Thread(() =>
+            {
+                try
+                {
+                    progress.SetPhase("Fetching catalog...");
+                    var catalog = engine.FetchCatalogPublic();
+                    var result = engine.ExecuteRedownload(catalog, bundlesOnly, progress);
+                    progress.Complete(result);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError($"Convoy redownload failed: {ex.Message}");
+                    Logger.LogDebug(ex);
+                    engine.SendReport("failed", null, ex.Message);
+                    progress.Complete(SyncResult.Failed, ex.Message);
+                }
+            })
+            {
+                Name = bundlesOnly ? "ConvoyBundleDL" : "ConvoyFullDL",
+                IsBackground = true
+            };
+            _execThread.Start();
+            _panel?.Close();
             _state = PluginState.Executing;
         }
 

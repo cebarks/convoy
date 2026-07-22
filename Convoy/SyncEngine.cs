@@ -30,6 +30,9 @@ namespace Convoy
 
         [JsonProperty("file_checksums")]
         public Dictionary<string, string> FileChecksums { get; set; } = new Dictionary<string, string>();
+
+        [JsonProperty("bundle_checksums")]
+        public Dictionary<string, string> BundleChecksums { get; set; } = new Dictionary<string, string>();
     }
 
     public class CatalogGroup
@@ -224,6 +227,88 @@ namespace Convoy
             };
         }
 
+        public SyncResult ExecuteRedownload(Catalog catalog, bool bundlesOnly, SyncProgress? progress = null)
+        {
+            var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
+            var allModIds = catalog.Groups.SelectMany(g => g.Mods).Select(m => m.Id).Distinct().ToList();
+
+            if (allModIds.Count == 0)
+            {
+                _log.LogInfo("No mods in catalog to redownload");
+                return SyncResult.UpToDate;
+            }
+
+            progress?.SetPhase(bundlesOnly
+                ? $"Downloading bundles for {allModIds.Count} mod{(allModIds.Count == 1 ? "" : "s")}..."
+                : $"Downloading {allModIds.Count} mod{(allModIds.Count == 1 ? "" : "s")}...");
+
+            var zipBytes = DownloadMods(serverUrl, allModIds, bundlesOnly, progress);
+
+            progress?.SetPhase("Extracting...");
+            var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
+            try
+            {
+                var extractedFiles = ExtractZip(zipBytes, stagingDir);
+
+                var expectedChecksums = new Dictionary<string, string>();
+                foreach (var group in catalog.Groups)
+                    foreach (var mod in group.Mods)
+                    {
+                        var checksums = bundlesOnly ? mod.BundleChecksums : mod.FileChecksums;
+                        foreach (var kv in checksums)
+                            expectedChecksums[kv.Key] = kv.Value;
+                        if (!bundlesOnly)
+                            foreach (var kv in mod.BundleChecksums)
+                                expectedChecksums[kv.Key] = kv.Value;
+                    }
+
+                progress?.SetPhase("Verifying hashes...");
+                if (!VerifyHashes(extractedFiles, expectedChecksums, stagingDir))
+                {
+                    _log.LogError("Hash verification failed, aborting redownload");
+                    SendReport("failed", null, "redownload hash verification failed");
+                    return SyncResult.Failed;
+                }
+
+                progress?.SetPhase("Installing files...");
+                MoveToGameRoot(extractedFiles, stagingDir);
+            }
+            finally
+            {
+                if (Directory.Exists(stagingDir))
+                    Directory.Delete(stagingDir, true);
+            }
+
+            if (!bundlesOnly)
+            {
+                var state = ConvoyState.Load();
+                state.ServerUrl = serverUrl;
+                state.Mods = catalog.Groups
+                    .SelectMany(g => g.Mods)
+                    .Select(m => new ModState
+                    {
+                        Id = m.Id,
+                        Version = m.Version,
+                        Files = m.FileChecksums
+                            .Select(f => new ModFileState { Path = f.Key, Hash = f.Value })
+                            .ToList()
+                    })
+                    .ToList();
+                state.Save();
+            }
+
+            if (bundlesOnly)
+            {
+                _log.LogInfo("Bundle redownload complete");
+                SendReport("updated", null, null);
+                return SyncResult.UpToDate;
+            }
+
+            _log.LogInfo("Full mod redownload complete");
+            SendReport("updated", null, null);
+            return SyncResult.RestartRequired;
+        }
+
         public SyncResult ExecuteSync(SyncPlan plan, List<int> confirmedModIds, HashSet<int> skippedModIds, SyncProgress? progress = null)
         {
             var state = plan.State;
@@ -249,7 +334,7 @@ namespace Convoy
             if (confirmedModIds.Count > 0)
             {
                 progress?.SetPhase($"Downloading {confirmedModIds.Count} mod{(confirmedModIds.Count == 1 ? "" : "s")}...");
-                var zipBytes = DownloadMods(plan.ServerUrl, confirmedModIds, progress);
+                var zipBytes = DownloadMods(plan.ServerUrl, confirmedModIds, false, progress);
 
                 progress?.SetPhase("Extracting...");
                 var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
@@ -262,6 +347,8 @@ namespace Convoy
                     {
                         if (!allEligible.TryGetValue(id, out var m)) continue;
                         foreach (var kv in m.FileChecksums)
+                            expectedChecksums[kv.Key] = kv.Value;
+                        foreach (var kv in m.BundleChecksums)
                             expectedChecksums[kv.Key] = kv.Value;
                     }
 
@@ -350,6 +437,12 @@ namespace Convoy
             return SyncResult.UpToDate;
         }
 
+        public Catalog FetchCatalogPublic()
+        {
+            var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
+            return FetchCatalog(serverUrl);
+        }
+
         private const int CatalogTimeoutMs = 15_000;
         private const int DownloadConnectTimeoutMs = 30_000;
         private const int MinBitrateBytes = 10 * 1024; // 10 KB/s
@@ -369,7 +462,7 @@ namespace Convoy
             }
         }
 
-        private byte[] DownloadMods(string serverUrl, List<int> modIds, SyncProgress? progress = null)
+        private byte[] DownloadMods(string serverUrl, List<int> modIds, bool bundlesOnly = false, SyncProgress? progress = null)
         {
             var request = WebRequest.CreateHttp($"{serverUrl}/quma/convoy/download");
             request.Method = "POST";
@@ -377,8 +470,10 @@ namespace Convoy
             request.Timeout = DownloadConnectTimeoutMs;
             request.ReadWriteTimeout = DownloadConnectTimeoutMs;
 
-            var body = Encoding.UTF8.GetBytes(
-                JsonConvert.SerializeObject(new { mods = modIds }));
+            var requestBody = bundlesOnly
+                ? new { mods = modIds, bundles_only = true }
+                : (object)new { mods = modIds };
+            var body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(requestBody));
             request.ContentLength = body.Length;
 
             using (var s = request.GetRequestStream())
