@@ -227,6 +227,88 @@ namespace Convoy
             };
         }
 
+        public SyncResult ExecuteRedownload(Catalog catalog, bool bundlesOnly, SyncProgress? progress = null)
+        {
+            var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
+            var allModIds = catalog.Groups.SelectMany(g => g.Mods).Select(m => m.Id).Distinct().ToList();
+
+            if (allModIds.Count == 0)
+            {
+                _log.LogInfo("No mods in catalog to redownload");
+                return SyncResult.UpToDate;
+            }
+
+            progress?.SetPhase(bundlesOnly
+                ? $"Downloading bundles for {allModIds.Count} mod{(allModIds.Count == 1 ? "" : "s")}..."
+                : $"Downloading {allModIds.Count} mod{(allModIds.Count == 1 ? "" : "s")}...");
+
+            var zipBytes = DownloadMods(serverUrl, allModIds, bundlesOnly, progress);
+
+            progress?.SetPhase("Extracting...");
+            var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
+            try
+            {
+                var extractedFiles = ExtractZip(zipBytes, stagingDir);
+
+                var expectedChecksums = new Dictionary<string, string>();
+                foreach (var group in catalog.Groups)
+                    foreach (var mod in group.Mods)
+                    {
+                        var checksums = bundlesOnly ? mod.BundleChecksums : mod.FileChecksums;
+                        foreach (var kv in checksums)
+                            expectedChecksums[kv.Key] = kv.Value;
+                        if (!bundlesOnly)
+                            foreach (var kv in mod.BundleChecksums)
+                                expectedChecksums[kv.Key] = kv.Value;
+                    }
+
+                progress?.SetPhase("Verifying hashes...");
+                if (!VerifyHashes(extractedFiles, expectedChecksums, stagingDir))
+                {
+                    _log.LogError("Hash verification failed, aborting redownload");
+                    SendReport("failed", null, "redownload hash verification failed");
+                    return SyncResult.Failed;
+                }
+
+                progress?.SetPhase("Installing files...");
+                MoveToGameRoot(extractedFiles, stagingDir);
+            }
+            finally
+            {
+                if (Directory.Exists(stagingDir))
+                    Directory.Delete(stagingDir, true);
+            }
+
+            if (!bundlesOnly)
+            {
+                var state = ConvoyState.Load();
+                state.ServerUrl = serverUrl;
+                state.Mods = catalog.Groups
+                    .SelectMany(g => g.Mods)
+                    .Select(m => new ModState
+                    {
+                        Id = m.Id,
+                        Version = m.Version,
+                        Files = m.FileChecksums
+                            .Select(f => new ModFileState { Path = f.Key, Hash = f.Value })
+                            .ToList()
+                    })
+                    .ToList();
+                state.Save();
+            }
+
+            if (bundlesOnly)
+            {
+                _log.LogInfo("Bundle redownload complete");
+                SendReport("updated", null, null);
+                return SyncResult.UpToDate;
+            }
+
+            _log.LogInfo("Full mod redownload complete");
+            SendReport("updated", null, null);
+            return SyncResult.RestartRequired;
+        }
+
         public SyncResult ExecuteSync(SyncPlan plan, List<int> confirmedModIds, HashSet<int> skippedModIds, SyncProgress? progress = null)
         {
             var state = plan.State;
@@ -353,6 +435,12 @@ namespace Convoy
 
             SendReport("up_to_date", state.Mods, null);
             return SyncResult.UpToDate;
+        }
+
+        public Catalog FetchCatalogPublic()
+        {
+            var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
+            return FetchCatalog(serverUrl);
         }
 
         private const int CatalogTimeoutMs = 15_000;
