@@ -30,6 +30,9 @@ namespace Convoy
 
         [JsonProperty("file_checksums")]
         public Dictionary<string, string> FileChecksums { get; set; } = new Dictionary<string, string>();
+
+        [JsonProperty("bundle_checksums")]
+        public Dictionary<string, string> BundleChecksums { get; set; } = new Dictionary<string, string>();
     }
 
     public class CatalogGroup
@@ -249,7 +252,7 @@ namespace Convoy
             if (confirmedModIds.Count > 0)
             {
                 progress?.SetPhase($"Downloading {confirmedModIds.Count} mod{(confirmedModIds.Count == 1 ? "" : "s")}...");
-                var zipBytes = DownloadMods(plan.ServerUrl, confirmedModIds, progress);
+                var zipBytes = DownloadMods(plan.ServerUrl, confirmedModIds, false, progress);
 
                 progress?.SetPhase("Extracting...");
                 var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
@@ -262,6 +265,8 @@ namespace Convoy
                     {
                         if (!allEligible.TryGetValue(id, out var m)) continue;
                         foreach (var kv in m.FileChecksums)
+                            expectedChecksums[kv.Key] = kv.Value;
+                        foreach (var kv in m.BundleChecksums)
                             expectedChecksums[kv.Key] = kv.Value;
                     }
 
@@ -369,7 +374,7 @@ namespace Convoy
             }
         }
 
-        private byte[] DownloadMods(string serverUrl, List<int> modIds, SyncProgress? progress = null)
+        private byte[] DownloadMods(string serverUrl, List<int> modIds, bool bundlesOnly = false, SyncProgress? progress = null)
         {
             var request = WebRequest.CreateHttp($"{serverUrl}/quma/convoy/download");
             request.Method = "POST";
@@ -377,8 +382,10 @@ namespace Convoy
             request.Timeout = DownloadConnectTimeoutMs;
             request.ReadWriteTimeout = DownloadConnectTimeoutMs;
 
-            var body = Encoding.UTF8.GetBytes(
-                JsonConvert.SerializeObject(new { mods = modIds }));
+            var requestBody = bundlesOnly
+                ? new { mods = modIds, bundles_only = true }
+                : (object)new { mods = modIds };
+            var body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(requestBody));
             request.ContentLength = body.Length;
 
             using (var s = request.GetRequestStream())
