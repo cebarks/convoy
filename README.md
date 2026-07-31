@@ -6,14 +6,14 @@ BepInEx 5 plugin for [SPT](https://www.sp-tarkov.com/) that syncs client-side mo
 
 1. Fetches the mod catalog from your Quartermaster server (with ETag caching)
 2. Diffs against local state to determine what needs to be installed, updated, or removed
-3. Downloads changed mods as a batch ZIP, extracts, and verifies SHA-256 hashes
+3. Downloads changed mods as a batch ZIP, extracts, and verifies xxHash3 hashes
 4. Prompts for a restart if any BepInEx plugin files changed (they're already loaded by the time Convoy runs)
 
 Optional mod groups are toggled via BepInEx Configuration Manager (F12 in-game).
 
 ## Installation
 
-Copy `Convoy.dll` to `BepInEx/plugins/Convoy/` in your SPT install directory.
+Copy the contents of `Build/BepInEx/plugins/Convoy/` (includes `Convoy.dll` and `System.IO.Hashing.dll`) to `BepInEx/plugins/Convoy/` in your SPT install directory.
 
 On first run, Convoy creates its config at `BepInEx/config/io.cebarks.convoy.cfg` — set `ServerUrl` to your Quartermaster instance (e.g. `http://192.168.1.50:9190`).
 

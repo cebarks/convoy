@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.IO.Hashing;
 using System.Linq;
 using System.Net;
-using System.Security.Cryptography;
 using System.Text;
 using BepInEx;
 using BepInEx.Logging;
@@ -563,22 +563,18 @@ namespace Convoy
 
         private bool VerifyHashes(List<string> extractedPaths, Dictionary<string, string> expected, string baseDir)
         {
-            using (var sha = SHA256.Create())
+            foreach (var relPath in extractedPaths)
             {
-                foreach (var relPath in extractedPaths)
+                if (!expected.TryGetValue(relPath, out var want)) continue;
+                var fullPath = Path.Combine(baseDir, relPath.Replace('/', Path.DirectorySeparatorChar));
+                var hasher = new XxHash3();
+                using (var stream = File.OpenRead(fullPath))
+                    hasher.Append(stream);
+                var got = hasher.GetCurrentHashAsUInt64().ToString("x16");
+                if (got != want.ToLowerInvariant())
                 {
-                    if (!expected.TryGetValue(relPath, out var want)) continue;
-                    var fullPath = Path.Combine(baseDir, relPath.Replace('/', Path.DirectorySeparatorChar));
-                    using (var stream = File.OpenRead(fullPath))
-                    {
-                        var got = BitConverter.ToString(sha.ComputeHash(stream))
-                            .Replace("-", "").ToLowerInvariant();
-                        if (got != want.ToLowerInvariant())
-                        {
-                            _log.LogError($"Hash mismatch: {relPath} (expected {want}, got {got})");
-                            return false;
-                        }
-                    }
+                    _log.LogError($"Hash mismatch: {relPath} (expected {want}, got {got})");
+                    return false;
                 }
             }
             return true;
