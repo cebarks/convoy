@@ -244,12 +244,9 @@ namespace Convoy
 
             var zipBytes = DownloadMods(serverUrl, allModIds, bundlesOnly, progress);
 
-            progress?.SetPhase("Extracting...");
             var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
             try
             {
-                var extractedFiles = ExtractZip(zipBytes, stagingDir);
-
                 var expectedChecksums = new Dictionary<string, string>();
                 foreach (var group in catalog.Groups)
                     foreach (var mod in group.Mods)
@@ -262,11 +259,11 @@ namespace Convoy
                                 expectedChecksums[kv.Key] = kv.Value;
                     }
 
-                progress?.SetPhase("Verifying hashes...");
-                if (!VerifyHashes(extractedFiles, expectedChecksums, stagingDir))
+                var extractedFiles = StageVerifiedZip(zipBytes, stagingDir, expectedChecksums, progress);
+                if (extractedFiles == null)
                 {
-                    _log.LogError("Hash verification failed, aborting redownload");
-                    SendReport("failed", null, "redownload hash verification failed");
+                    _log.LogError("Archive verification failed, aborting redownload");
+                    SendReport("failed", null, "redownload archive verification failed");
                     return SyncResult.Failed;
                 }
 
@@ -317,31 +314,14 @@ namespace Convoy
 
             var allEligible = new Dictionary<int, CatalogMod>(plan.WantedMods);
 
-            foreach (var modId in confirmedModIds)
-            {
-                if (!currentMods.TryGetValue(modId, out var oldMod)) continue;
-                if (!allEligible.TryGetValue(modId, out var newMod)) continue;
-                var newFiles = new HashSet<string>(newMod.FileChecksums.Keys);
-                foreach (var file in oldMod.Files.Where(f => !newFiles.Contains(f.Path)))
-                {
-                    if (plan.Exclusions.Contains(file.Path)) continue;
-                    var fullPath = ResolvePath(file.Path);
-                    if (File.Exists(fullPath))
-                        File.Delete(fullPath);
-                }
-            }
-
             if (confirmedModIds.Count > 0)
             {
                 progress?.SetPhase($"Downloading {confirmedModIds.Count} mod{(confirmedModIds.Count == 1 ? "" : "s")}...");
                 var zipBytes = DownloadMods(plan.ServerUrl, confirmedModIds, false, progress);
 
-                progress?.SetPhase("Extracting...");
                 var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
                 try
                 {
-                    var extractedFiles = ExtractZip(zipBytes, stagingDir);
-
                     var expectedChecksums = new Dictionary<string, string>();
                     foreach (var id in confirmedModIds)
                     {
@@ -352,19 +332,16 @@ namespace Convoy
                             expectedChecksums[kv.Key] = kv.Value;
                     }
 
-                    var unverified = extractedFiles.Where(p => !expectedChecksums.ContainsKey(p)).ToList();
-                    if (unverified.Count > 0)
-                        _log.LogWarning($"ZIP contained {unverified.Count} file(s) not in catalog checksums");
-
-                    progress?.SetPhase("Verifying hashes...");
-                    if (!VerifyHashes(extractedFiles, expectedChecksums, stagingDir))
+                    var extractedFiles = StageVerifiedZip(zipBytes, stagingDir, expectedChecksums, progress);
+                    if (extractedFiles == null)
                     {
-                        _log.LogError("Hash verification failed, aborting sync");
-                        SendReport("failed", null, "hash verification failed");
+                        _log.LogError("Archive verification failed, aborting sync");
+                        SendReport("failed", null, "archive verification failed");
                         return SyncResult.Failed;
                     }
 
                     progress?.SetPhase("Installing files...");
+                    DeleteSupersededFiles(plan, confirmedModIds, currentMods);
                     MoveToGameRoot(extractedFiles, stagingDir);
                 }
                 finally
@@ -531,11 +508,14 @@ namespace Convoy
             }
         }
 
-        private List<string> ExtractZip(byte[] zipBytes, string targetDir)
+        private HashSet<string>? StageVerifiedZip(byte[] zipBytes, string targetDir,
+            Dictionary<string, string> expected, SyncProgress? progress)
         {
+            progress?.SetPhase("Extracting...");
             var normalizedTarget = Path.GetFullPath(targetDir).TrimEnd(Path.DirectorySeparatorChar)
                                    + Path.DirectorySeparatorChar;
-            var extracted = new List<string>();
+            var extracted = new HashSet<string>(StringComparer.Ordinal);
+            int unadvertised = 0;
 
             using (var ms = new MemoryStream(zipBytes))
             using (var archive = new ZipArchive(ms, ZipArchiveMode.Read))
@@ -543,44 +523,76 @@ namespace Convoy
                 foreach (var entry in archive.Entries)
                 {
                     if (string.IsNullOrEmpty(entry.Name)) continue;
+                    if (!expected.ContainsKey(entry.FullName))
+                    {
+                        unadvertised++;
+                        continue;
+                    }
+                    if (!extracted.Add(entry.FullName))
+                    {
+                        _log.LogError($"ZIP contained duplicate catalog path: {entry.FullName}");
+                        return null;
+                    }
 
                     var destPath = Path.GetFullPath(Path.Combine(targetDir,
                         entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
-                    if (!destPath.StartsWith(normalizedTarget))
+                    if (!destPath.StartsWith(normalizedTarget, StringComparison.Ordinal))
                         throw new InvalidOperationException($"ZIP path escapes target: {entry.FullName}");
 
                     Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
                     using (var src = entry.Open())
                     using (var dst = File.Create(destPath))
                         src.CopyTo(dst);
-
-                    extracted.Add(entry.FullName);
                 }
             }
 
-            return extracted;
+            if (unadvertised > 0)
+                _log.LogWarning($"Ignored {unadvertised} ZIP file(s) with no catalog checksum");
+            progress?.SetPhase("Verifying hashes...");
+            return VerifyHashes(extracted, expected, targetDir) ? extracted : null;
         }
 
-        private bool VerifyHashes(List<string> extractedPaths, Dictionary<string, string> expected, string baseDir)
+        private bool VerifyHashes(HashSet<string> extractedPaths, Dictionary<string, string> expected, string baseDir)
         {
-            foreach (var relPath in extractedPaths)
+            foreach (var item in expected)
             {
-                if (!expected.TryGetValue(relPath, out var want)) continue;
+                var relPath = item.Key;
+                if (!extractedPaths.Contains(relPath))
+                {
+                    _log.LogError($"ZIP is missing catalog path: {relPath}");
+                    return false;
+                }
                 var fullPath = Path.Combine(baseDir, relPath.Replace('/', Path.DirectorySeparatorChar));
                 var hasher = new XxHash3();
                 using (var stream = File.OpenRead(fullPath))
                     hasher.Append(stream);
                 var got = hasher.GetCurrentHashAsUInt64().ToString("x16");
-                if (got != want.ToLowerInvariant())
+                if (!string.Equals(got, item.Value, StringComparison.OrdinalIgnoreCase))
                 {
-                    _log.LogError($"Hash mismatch: {relPath} (expected {want}, got {got})");
+                    _log.LogError($"Hash mismatch: {relPath} (expected {item.Value}, got {got})");
                     return false;
                 }
             }
             return true;
         }
 
-        private void MoveToGameRoot(List<string> files, string stagingDir)
+        private void DeleteSupersededFiles(SyncPlan plan, IEnumerable<int> modIds, Dictionary<int, ModState> current)
+        {
+            foreach (var modId in modIds)
+            {
+                if (!current.TryGetValue(modId, out var oldMod)) continue;
+                if (!plan.WantedMods.TryGetValue(modId, out var newMod)) continue;
+                foreach (var file in oldMod.Files)
+                {
+                    if (newMod.FileChecksums.ContainsKey(file.Path) || plan.Exclusions.Contains(file.Path)) continue;
+                    var fullPath = ResolvePath(file.Path);
+                    if (File.Exists(fullPath))
+                        File.Delete(fullPath);
+                }
+            }
+        }
+
+        private void MoveToGameRoot(IEnumerable<string> files, string stagingDir)
         {
             foreach (var relPath in files)
             {
