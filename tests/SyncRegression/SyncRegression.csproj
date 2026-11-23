@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net472</TargetFramework>
+        <OutputType>Exe</OutputType>
+        <ConvoyBuildDir Condition="'$(ConvoyBuildDir)' == ''">$(MSBuildThisFileDirectory)../../Convoy/bin/Release</ConvoyBuildDir>
+    </PropertyGroup>
+    <ItemGroup>
+        <Reference Include="Convoy" HintPath="$(ConvoyBuildDir)/Convoy.dll" Private="false" />
+        <Reference Include="BepInEx" HintPath="$(ConvoyBuildDir)/BepInEx.dll" Private="false" />
+        <Reference Include="System.IO.Compression" />
+    </ItemGroup>
+</Project>

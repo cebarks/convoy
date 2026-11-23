@@ -6,7 +6,7 @@ BepInEx 5 plugin for [SPT](https://www.sp-tarkov.com/) that syncs client-side mo
 
 1. Fetches the mod catalog from your Quartermaster server (with ETag caching)
 2. Diffs against local state to determine what needs to be installed, updated, or removed
-3. Downloads changed mods as a batch ZIP, extracts, and verifies xxHash3 hashes
+3. Downloads changed mods as a batch ZIP and stages only catalog-listed files. Every requested file must be present and match its xxHash3 checksum before files or sync state are changed.
 4. Prompts for a restart if any BepInEx plugin files changed (they're already loaded by the time Convoy runs)
 
 Optional mod groups are toggled via BepInEx Configuration Manager (F12 in-game).
@@ -32,6 +32,18 @@ Build output: `Build/BepInEx/plugins/Convoy/Convoy.dll`
 By default the project resolves game DLLs by looking two directories up from the project root (assumes you cloned inside the SPT directory tree). Set `TarkovDir` or the `TARKOV_DIR` env var to override.
 
 CI builds use stub assemblies (`-p:UseStubs=true`) to avoid needing copyrighted game DLLs.
+
+## Sync regression test
+
+Build Convoy in Release against a real SPT installation with `DeployAfterBuild=false`, then run the loopback test with Mono:
+
+```bash
+dotnet build tests/SyncRegression/SyncRegression.csproj -c Release
+MONO_PATH="$PWD/Convoy/bin/Release" mono tests/SyncRegression/bin/Release/SyncRegression.exe \
+  '-config={"BackendUrl":"http://127.0.0.1:1","Version":"live"}' '-token=convoy-regression'
+```
+
+The launcher arguments initialize SPT's request handler; the test uses an ephemeral loopback server and temporary game roots, not your SPT install.
 
 ## License
 
