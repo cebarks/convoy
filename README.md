@@ -11,6 +11,20 @@ BepInEx 5 plugin for [SPT](https://www.sp-tarkov.com/) that syncs client-side mo
 
 Optional mod groups are toggled via BepInEx Configuration Manager (F12 in-game).
 
+## Supported files and ownership
+
+Sync supports canonical `BepInEx/` paths, package dependency DLLs directly under `EscapeFromTarkov_Data/Managed/`, and existing SPT bundle-cache exports. Other game-root paths, traversal, drive paths, backslashes, Windows aliases, case collisions and symlink/reparse destinations are rejected before mutation. Missing, corrupt, duplicate or unadvertised archive contents abort the operation without deleting installed files or committing state.
+
+Existing matching files are usable without being adopted: state records `owned: false`. Differing unowned files and locally modified assemblies cause a conflict rather than an overwrite. Existing `BepInEx/config/` files are preserved, including when package defaults change. Only unchanged owned files no longer needed by any selected mod are removed. Shared dependencies survive removal of one owner. Legacy state ownership applies only to BepInEx, never Managed assemblies. Same-version advertised manifest changes trigger synchronization.
+
+File replacement/deletion is preflighted and rolled back on ordinary I/O failures; state uses atomic replacement. This is not a crash-durable journal or protection against hostile concurrent local filesystem mutation. Do not run other installers during sync. Unique `.convoy-old-*` backups may remain when Windows holds a loaded DLL; unrelated backup files are not recursively deleted.
+
+### Coordinated publisher upgrade
+
+There is no capability handshake. Release this client as a distinct mod version, upgrade it via the old publisher's existing BepInEx-only Convoy bootstrap/self-update operation, and restart clients **before** enabling Managed publication. Do not combine dependency-bearing mod updates with the bootstrap. Old clients accept roots without these ownership protections and miss same-version manifest changes. New clients reject old-server archives with unadvertised dependencies, so dependency installations must wait until publisher rollout finishes. BepInEx-only old-server archives remain supported. Mixed-version enforcement requires a separately reviewed protocol policy; these changes do not silently omit dependencies to accommodate old clients.
+
+The independent player setup ZIP can include the dependency DLLs, but is not a safe overlay installer for populated game directories. Existing setup-installed or manually repaired matching DLLs remain unowned. No game reference assemblies are distributed in source tests.
+
 ## Installation
 
 Copy the contents of `Build/BepInEx/plugins/Convoy/` (includes `Convoy.dll` and `System.IO.Hashing.dll`) to `BepInEx/plugins/Convoy/` in your SPT install directory.
@@ -43,7 +57,9 @@ MONO_PATH="$PWD/Convoy/bin/Release" mono tests/SyncRegression/bin/Release/SyncRe
   '-config={"BackendUrl":"http://127.0.0.1:1","Version":"live"}' '-token=convoy-regression'
 ```
 
-The launcher arguments initialize SPT's request handler; the test uses an ephemeral loopback server and temporary game roots, not your SPT install.
+The launcher arguments initialize the real SPT request handler; use a non-secret fixture token for this isolated process. The test uses ephemeral loopback servers and temporary game roots, not your SPT install. Mono tests do not prove native Unity startup or raid behavior.
+
+For cross-repository publisher tests, build this harness, then run Quartermaster's `managed_dependency_publisher_delivery_setup_and_cache` integration test with `CONVOY_MONO_REGRESSION` set to the absolute `SyncRegression.exe` path and `MONO_PATH` set to this client's Release output. `CONVOY_FIXTURE_EXPORT` optionally captures synthetic catalog/archive fixtures in a private directory. The integration starts real Quartermaster handlers on loopback, runs the consumer against fresh and populated/repaired roots, and stops the listener. Without the environment variable the ordinary Rust test still verifies both archive routes, setup contents and warm-cache invalidation.
 
 ## License
 

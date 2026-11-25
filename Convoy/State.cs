@@ -10,6 +10,10 @@ namespace Convoy
         [JsonProperty("path")]
         public string Path { get; set; } = "";
 
+        // Null is legacy ownership: BepInEx only, never a game assembly.
+        [JsonProperty("owned")]
+        public bool? Owned { get; set; }
+
         [JsonProperty("hash")]
         public string Hash { get; set; } = "";
     }
@@ -69,7 +73,14 @@ namespace Convoy
         public void Save()
         {
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(FilePath)!);
-            File.WriteAllText(FilePath, JsonConvert.SerializeObject(this, Formatting.Indented));
+            var temporary = FilePath + "." + System.Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, JsonConvert.SerializeObject(this, Formatting.Indented));
+                if (File.Exists(FilePath)) File.Replace(temporary, FilePath, null);
+                else File.Move(temporary, FilePath);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
     }
 }

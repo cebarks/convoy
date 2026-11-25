@@ -117,7 +117,7 @@ namespace Convoy
         public SyncPlan? PlanSync(SyncProgress? progress = null)
         {
             progress?.SetPhase("Cleaning up...");
-            CleanPendingDeletes();
+            // No recursive deletion of unowned *.convoy-old files.
 
             var state = ConvoyState.Load();
             var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
@@ -125,6 +125,11 @@ namespace Convoy
             progress?.SetPhase("Fetching catalog...");
             var catalog = FetchCatalog(serverUrl);
 
+            // Reject unsupported catalogs before no-op bookkeeping or any state save.
+            ValidateCatalog(catalog);
+            var pathGuard = new SyncFiles(_gameRoot, state.Mods);
+            foreach (var path in catalog.Groups.SelectMany(g => g.Mods).SelectMany(m => m.FileChecksums.Keys.Concat(m.BundleChecksums.Keys))) pathGuard.Resolve(path);
+            pathGuard.Resolve("BepInEx/config/Convoy/state.json");
             state.OptionalGroups = _config.RegisterOptionalGroups(catalog.Groups);
 
             var catalogModGroups = new Dictionary<int, (CatalogMod mod, CatalogGroup group)>();
@@ -164,6 +169,7 @@ namespace Convoy
                     });
                 }
                 else if (current.Version != mod.Version
+                         || !ManifestMatches(current, mod)
                          || current.Files.Any(f => !File.Exists(ResolvePath(f.Path))))
                 {
                     updates.Add(new PlannedMod
@@ -227,191 +233,123 @@ namespace Convoy
             };
         }
 
+        private static void ValidateCatalog(Catalog catalog)
+        {
+            var mods = catalog.Groups.SelectMany(g => g.Mods).ToList();
+            // Validate the complete inventory before selection, deduplication or no-op returns.
+            Checksums(mods);
+            foreach (var group in mods.GroupBy(m => m.Id))
+            {
+                var first = group.First();
+                foreach (var mod in group.Skip(1))
+                    if (mod.Version != first.Version || mod.Name != first.Name || mod.ForgeId != first.ForgeId
+                        || !SameManifest(first.FileChecksums, mod.FileChecksums)
+                        || !SameManifest(first.BundleChecksums, mod.BundleChecksums))
+                        throw new InvalidOperationException("Inconsistent duplicate catalog mod ID: " + mod.Id);
+            }
+        }
+
+        private static bool SameManifest(Dictionary<string, string> first, Dictionary<string, string> other)
+            => first.Count == other.Count && first.All(p => other.TryGetValue(p.Key, out var hash) && hash == p.Value);
+
+        private static bool ManifestMatches(ModState current, CatalogMod mod)
+        {
+            var advertised = Checksums(new[] { mod });
+            return current.Files.Count == advertised.Count && current.Files.All(f => advertised.TryGetValue(f.Path, out var hash) && hash == f.Hash);
+        }
+
+        private static Dictionary<string, string> Checksums(IEnumerable<CatalogMod> mods, bool bundlesOnly = false)
+        {
+            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+            var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var mod in mods)
+                foreach (var pair in (bundlesOnly ? mod.BundleChecksums : mod.FileChecksums.Concat(mod.BundleChecksums)))
+                {
+                    if (!SyncFiles.Allowed(pair.Key) || pair.Key.StartsWith("BepInEx/config/Convoy/", StringComparison.OrdinalIgnoreCase) || (aliases.TryGetValue(pair.Key, out var name) && name != pair.Key)
+                        || (result.TryGetValue(pair.Key, out var prior) && prior != pair.Value))
+                        throw new InvalidOperationException("Conflicting or unsupported catalog path: " + pair.Key);
+                    aliases[pair.Key] = pair.Key;
+                    result[pair.Key] = pair.Value;
+                }
+            return result;
+        }
+
         public SyncResult ExecuteRedownload(Catalog catalog, bool bundlesOnly, SyncProgress? progress = null)
         {
-            var serverUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/');
-            var allModIds = catalog.Groups.SelectMany(g => g.Mods).Select(m => m.Id).Distinct().ToList();
-
-            if (allModIds.Count == 0)
-            {
-                _log.LogInfo("No mods in catalog to redownload");
-                return SyncResult.UpToDate;
-            }
-
-            progress?.SetPhase(bundlesOnly
-                ? $"Downloading bundles for {allModIds.Count} mod{(allModIds.Count == 1 ? "" : "s")}..."
-                : $"Downloading {allModIds.Count} mod{(allModIds.Count == 1 ? "" : "s")}...");
-
-            var zipBytes = DownloadMods(serverUrl, allModIds, bundlesOnly, progress);
-
-            var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
+            try { ValidateCatalog(catalog); }
+            catch (Exception ex) { _log.LogError("Redownload aborted: " + ex.Message); return SyncResult.Failed; }
+            var state = ConvoyState.Load();
+            // Redownload must not install unselected optional groups or silently adopt files.
+            var ids = new HashSet<int>(state.Mods.Select(m => m.Id));
+            var mods = catalog.Groups.SelectMany(g => g.Mods).Where(m => ids.Contains(m.Id)).GroupBy(m => m.Id).Select(g => g.First()).ToList();
+            if (mods.Count == 0) return SyncResult.UpToDate;
+            var plan = new SyncPlan { Catalog = catalog, State = state,
+                ServerUrl = SPT.Common.Http.RequestHandler.Host.TrimEnd('/'),
+                WantedMods = mods.ToDictionary(m => m.Id) };
+            if (!bundlesOnly) return ExecuteSync(plan, mods.Select(m => m.Id).ToList(), state.SkippedMods, progress);
+            var staging = Path.Combine(Path.GetTempPath(), "convoy-" + Guid.NewGuid().ToString("N"));
             try
             {
-                var expectedChecksums = new Dictionary<string, string>();
-                foreach (var group in catalog.Groups)
-                    foreach (var mod in group.Mods)
-                    {
-                        var checksums = bundlesOnly ? mod.BundleChecksums : mod.FileChecksums;
-                        foreach (var kv in checksums)
-                            expectedChecksums[kv.Key] = kv.Value;
-                        if (!bundlesOnly)
-                            foreach (var kv in mod.BundleChecksums)
-                                expectedChecksums[kv.Key] = kv.Value;
-                    }
-
-                var extractedFiles = StageVerifiedZip(zipBytes, stagingDir, expectedChecksums, progress);
-                if (extractedFiles == null)
-                {
-                    _log.LogError("Archive verification failed, aborting redownload");
-                    SendReport("failed", null, "redownload archive verification failed");
-                    return SyncResult.Failed;
-                }
-
-                progress?.SetPhase("Installing files...");
-                MoveToGameRoot(extractedFiles, stagingDir);
-            }
-            finally
-            {
-                if (Directory.Exists(stagingDir))
-                    Directory.Delete(stagingDir, true);
-            }
-
-            if (!bundlesOnly)
-            {
-                var state = ConvoyState.Load();
-                state.ServerUrl = serverUrl;
-                state.Mods = catalog.Groups
-                    .SelectMany(g => g.Mods)
-                    .Select(m => new ModState
-                    {
-                        Id = m.Id,
-                        Version = m.Version,
-                        Files = m.FileChecksums
-                            .Select(f => new ModFileState { Path = f.Key, Hash = f.Value })
-                            .ToList()
-                    })
-                    .ToList();
-                state.Save();
-            }
-
-            if (bundlesOnly)
-            {
-                _log.LogInfo("Bundle redownload complete");
-                SendReport("updated", null, null);
+                var expected = Checksums(mods, true);
+                var files = StageVerifiedZip(DownloadMods(plan.ServerUrl, mods.Select(m => m.Id).ToList(), true, progress), staging, expected, progress);
+                if (files == null) return SyncResult.Failed;
+                var transaction = new SyncFiles(_gameRoot, state.Mods);
+                transaction.Preflight(expected, Array.Empty<string>(), Array.Empty<ModFileState>());
+                transaction.Apply(staging, () => { });
                 return SyncResult.UpToDate;
             }
-
-            _log.LogInfo("Full mod redownload complete");
-            SendReport("updated", null, null);
-            return SyncResult.RestartRequired;
+            catch (Exception ex) { _log.LogError("Redownload aborted: " + ex.Message); return SyncResult.Failed; }
+            finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
         }
 
         public SyncResult ExecuteSync(SyncPlan plan, List<int> confirmedModIds, HashSet<int> skippedModIds, SyncProgress? progress = null)
         {
-            var state = plan.State;
-            var currentMods = state.Mods.ToDictionary(m => m.Id);
-            var confirmedSet = new HashSet<int>(confirmedModIds);
-
-            var allEligible = new Dictionary<int, CatalogMod>(plan.WantedMods);
-
-            if (confirmedModIds.Count > 0)
+            var staging = Path.Combine(Path.GetTempPath(), "convoy-" + Guid.NewGuid().ToString("N"));
+            try
             {
-                progress?.SetPhase($"Downloading {confirmedModIds.Count} mod{(confirmedModIds.Count == 1 ? "" : "s")}...");
-                var zipBytes = DownloadMods(plan.ServerUrl, confirmedModIds, false, progress);
-
-                var stagingDir = Path.Combine(Path.GetTempPath(), $"convoy-{Guid.NewGuid():N}");
-                try
+                var confirmed = new HashSet<int>(confirmedModIds);
+                if (confirmed.Count != confirmedModIds.Count || confirmed.Any(id => !plan.WantedMods.ContainsKey(id)))
+                    throw new InvalidOperationException("Invalid confirmed mod selection");
+                var remove = new HashSet<int>(plan.Removals.Select(m => m.Id));
+                var selected = plan.WantedMods.Values.Where(m => !remove.Contains(m.Id)).ToList();
+                // Validate even unchanged/unconfirmed selected manifests before any removal.
+                var retained = Checksums(selected);
+                var expected = Checksums(selected.Where(m => confirmed.Contains(m.Id)));
+                var transaction = new SyncFiles(_gameRoot, plan.State.Mods);
+                transaction.Resolve("BepInEx/config/Convoy/state.json");
+                foreach (var path in retained.Keys) transaction.Resolve(path);
+                if (confirmed.Count > 0 && StageVerifiedZip(DownloadMods(plan.ServerUrl, confirmedModIds, false, progress), staging, expected, progress) == null)
+                    return SyncResult.Failed;
+                var removed = plan.State.Mods.Where(m => remove.Contains(m.Id) || confirmed.Contains(m.Id))
+                    .SelectMany(m => m.Files).Where(f => !plan.Exclusions.Contains(f.Path));
+                transaction.Preflight(expected, retained.Keys, removed);
+                var next = new List<ModState>();
+                foreach (var mod in selected)
                 {
-                    var expectedChecksums = new Dictionary<string, string>();
-                    foreach (var id in confirmedModIds)
-                    {
-                        if (!allEligible.TryGetValue(id, out var m)) continue;
-                        foreach (var kv in m.FileChecksums)
-                            expectedChecksums[kv.Key] = kv.Value;
-                        foreach (var kv in m.BundleChecksums)
-                            expectedChecksums[kv.Key] = kv.Value;
-                    }
-
-                    var extractedFiles = StageVerifiedZip(zipBytes, stagingDir, expectedChecksums, progress);
-                    if (extractedFiles == null)
-                    {
-                        _log.LogError("Archive verification failed, aborting sync");
-                        SendReport("failed", null, "archive verification failed");
-                        return SyncResult.Failed;
-                    }
-
-                    progress?.SetPhase("Installing files...");
-                    DeleteSupersededFiles(plan, confirmedModIds, currentMods);
-                    MoveToGameRoot(extractedFiles, stagingDir);
+                    if (confirmed.Contains(mod.Id)) next.Add(new ModState { Id = mod.Id, Version = mod.Version,
+                        Files = mod.FileChecksums.Concat(mod.BundleChecksums).Select(f => transaction.Record(f.Key, f.Value)).ToList() });
+                    else if (plan.State.Mods.FirstOrDefault(m => m.Id == mod.Id) is ModState existing)
+                        next.Add(new ModState { Id = existing.Id, Version = existing.Version,
+                            Files = existing.Files.Select(f => expected.TryGetValue(f.Path, out var hash) ? transaction.Record(f.Path, hash) : f).ToList() });
                 }
-                finally
-                {
-                    if (Directory.Exists(stagingDir))
-                        Directory.Delete(stagingDir, true);
-                }
+                var catalogIds = new HashSet<int>(plan.Catalog.Groups.SelectMany(g => g.Mods).Select(m => m.Id));
+                var skipped = new HashSet<int>(skippedModIds);
+                skipped.IntersectWith(catalogIds);
+                var newState = new ConvoyState { ServerUrl = plan.ServerUrl, Mods = next,
+                    EnabledGroups = plan.State.EnabledGroups, OptionalGroups = plan.State.OptionalGroups, SkippedMods = skipped };
+                progress?.SetPhase("Installing verified files...");
+                transaction.Apply(staging, newState.Save);
+                var result = confirmed.Count > 0 || remove.Count > 0 ? SyncResult.RestartRequired : SyncResult.UpToDate;
+                SendReport(result == SyncResult.RestartRequired ? "updated" : "up_to_date", newState.Mods, null);
+                return result;
             }
-
-            var removeIds = new HashSet<int>(plan.Removals.Select(r => r.Id));
-            if (removeIds.Count > 0)
+            catch (Exception ex)
             {
-                progress?.SetPhase("Removing old mods...");
-                foreach (var modId in removeIds)
-                {
-                    if (!currentMods.TryGetValue(modId, out var mod)) continue;
-                    foreach (var file in mod.Files)
-                    {
-                        if (plan.Exclusions.Contains(file.Path)) continue;
-                        var fullPath = ResolvePath(file.Path);
-                        if (File.Exists(fullPath))
-                        {
-                            File.Delete(fullPath);
-                            _log.LogInfo($"Removed: {file.Path}");
-                        }
-                    }
-                    CleanEmptyDirs(mod.Files
-                        .Where(f => !plan.Exclusions.Contains(f.Path))
-                        .Select(f => ResolvePath(f.Path)));
-                }
+                _log.LogError("Sync aborted without committing state: " + ex.Message);
+                SendReport("failed", null, ex.Message);
+                return SyncResult.Failed;
             }
-
-            var newMods = new List<ModState>();
-            foreach (var kv in allEligible)
-            {
-                if (removeIds.Contains(kv.Key)) continue;
-
-                if (!confirmedSet.Contains(kv.Key))
-                {
-                    if (currentMods.TryGetValue(kv.Key, out var existing))
-                        newMods.Add(existing);
-                    continue;
-                }
-
-                newMods.Add(new ModState
-                {
-                    Id = kv.Value.Id,
-                    Version = kv.Value.Version,
-                    Files = kv.Value.FileChecksums.Select(f => new ModFileState { Path = f.Key, Hash = f.Value }).ToList()
-                });
-            }
-
-            var catalogIds = new HashSet<int>(
-                plan.Catalog.Groups.SelectMany(g => g.Mods).Select(m => m.Id));
-            skippedModIds.IntersectWith(catalogIds);
-
-            state.ServerUrl = plan.ServerUrl;
-            state.Mods = newMods;
-            state.SkippedMods = skippedModIds;
-            state.Save();
-
-            if (confirmedModIds.Count > 0 || removeIds.Count > 0)
-            {
-                _log.LogWarning("Convoy sync complete — restart required for changes to take effect");
-                SendReport("updated", state.Mods, null);
-                return SyncResult.RestartRequired;
-            }
-
-            SendReport("up_to_date", state.Mods, null);
-            return SyncResult.UpToDate;
+            finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
         }
 
         public Catalog FetchCatalogPublic()
@@ -515,18 +453,23 @@ namespace Convoy
             var normalizedTarget = Path.GetFullPath(targetDir).TrimEnd(Path.DirectorySeparatorChar)
                                    + Path.DirectorySeparatorChar;
             var extracted = new HashSet<string>(StringComparer.Ordinal);
-            int unadvertised = 0;
+            if (expected.Keys.Any(path => !SyncFiles.Allowed(path))) return null;
 
             using (var ms = new MemoryStream(zipBytes))
             using (var archive = new ZipArchive(ms, ZipArchiveMode.Read))
             {
                 foreach (var entry in archive.Entries)
                 {
-                    if (string.IsNullOrEmpty(entry.Name)) continue;
+                    if ((entry.ExternalAttributes >> 16 & 0xF000) == 0xA000) return null;
+                    if (string.IsNullOrEmpty(entry.Name))
+                    {
+                        if (!entry.FullName.EndsWith("/", StringComparison.Ordinal) || !expected.Keys.Any(p => p.StartsWith(entry.FullName, StringComparison.Ordinal))) return null;
+                        continue;
+                    }
                     if (!expected.ContainsKey(entry.FullName))
                     {
-                        unadvertised++;
-                        continue;
+                        _log.LogError("Unadvertised ZIP path: " + entry.FullName);
+                        return null;
                     }
                     if (!extracted.Add(entry.FullName))
                     {
@@ -546,8 +489,6 @@ namespace Convoy
                 }
             }
 
-            if (unadvertised > 0)
-                _log.LogWarning($"Ignored {unadvertised} ZIP file(s) with no catalog checksum");
             progress?.SetPhase("Verifying hashes...");
             return VerifyHashes(extracted, expected, targetDir) ? extracted : null;
         }
@@ -576,80 +517,7 @@ namespace Convoy
             return true;
         }
 
-        private void DeleteSupersededFiles(SyncPlan plan, IEnumerable<int> modIds, Dictionary<int, ModState> current)
-        {
-            foreach (var modId in modIds)
-            {
-                if (!current.TryGetValue(modId, out var oldMod)) continue;
-                if (!plan.WantedMods.TryGetValue(modId, out var newMod)) continue;
-                foreach (var file in oldMod.Files)
-                {
-                    if (newMod.FileChecksums.ContainsKey(file.Path) || plan.Exclusions.Contains(file.Path)) continue;
-                    var fullPath = ResolvePath(file.Path);
-                    if (File.Exists(fullPath))
-                        File.Delete(fullPath);
-                }
-            }
-        }
-
-        private void MoveToGameRoot(IEnumerable<string> files, string stagingDir)
-        {
-            foreach (var relPath in files)
-            {
-                var src = Path.Combine(stagingDir, relPath.Replace('/', Path.DirectorySeparatorChar));
-                var dst = ResolvePath(relPath);
-                Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
-
-                if (File.Exists(dst))
-                {
-                    // ponytail: loaded DLLs can be renamed but not overwritten on Windows
-                    var pending = dst + ".convoy-old";
-                    try { File.Delete(pending); } catch { }
-                    File.Move(dst, pending);
-                }
-
-                File.Copy(src, dst);
-            }
-        }
-
-        private void CleanPendingDeletes()
-        {
-            try
-            {
-                foreach (var old in Directory.EnumerateFiles(_gameRoot, "*.convoy-old", SearchOption.AllDirectories))
-                {
-                    File.Delete(old);
-                    _log.LogDebug($"Cleaned up {old}");
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning($"Failed to clean pending deletes: {ex.Message}");
-            }
-        }
-
-        private string ResolvePath(string relativePath) =>
-            Path.Combine(_gameRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
-
-        private void CleanEmptyDirs(IEnumerable<string> deletedPaths)
-        {
-            var normalizedRoot = Path.GetFullPath(_gameRoot).TrimEnd(Path.DirectorySeparatorChar);
-            foreach (var filePath in deletedPaths)
-            {
-                var dir = Path.GetDirectoryName(filePath);
-                while (dir != null && dir.Length > normalizedRoot.Length)
-                {
-                    try
-                    {
-                        if (!Directory.Exists(dir) || Directory.EnumerateFileSystemEntries(dir).Any())
-                            break;
-                        Directory.Delete(dir);
-                        dir = Path.GetDirectoryName(dir);
-                    }
-                    catch { break; }
-                }
-            }
-        }
+        private string ResolvePath(string relativePath) => new SyncFiles(_gameRoot, Array.Empty<ModState>()).Resolve(relativePath);
 
         internal void SendReport(string result, List<ModState>? mods, string? error)
         {

@@ -1,7 +1,7 @@
 # Convoy — Mod Delivery & Management System
 
 **Date:** 2026-07-05
-**Status:** Design
+**Status:** Historical design; current supported roots, ownership, archive validation and coordinated upgrade contract are documented in [README](../README.md#supported-files-and-ownership). File-set/checksum changes now trigger sync even at the same mod version.
 **Replaces:** NarcoNet integration (`src/modsync.rs`)
 
 ## Problem
