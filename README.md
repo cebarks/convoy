@@ -9,6 +9,9 @@ BepInEx 5 plugin for [SPT](https://www.sp-tarkov.com/) that syncs client-side mo
 3. Streams only missing or changed objects, reuses verified local bytes and resumes validated partial transfers. Sizes and SHA-256 must match before files or sync state are changed. Sync and repair never use a mod ZIP.
 4. Prompts for a restart if any BepInEx plugin files changed (they're already loaded by the time Convoy runs)
 
+Installed-file checks use up to four readers. Up to eight distinct objects can download concurrently; Convoy still verifies them before making any live file changes.
+When the filesystem supports protected preparation, verification also writes the future install files, and Apply moves those exact files into place without copying or rehashing them.
+
 Optional mod groups are toggled via BepInEx Configuration Manager (F12 in-game).
 
 ## Supported files and ownership

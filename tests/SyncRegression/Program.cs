@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading.Tasks;
@@ -44,6 +45,7 @@ internal static class Program
             ("v2 resumes only unfinished object", g => g.Resume()),
             ("v2 second process does not acquire root", g => g.Exclusive()),
             ("v2 staging cap", g => g.Cap()),
+            ("eight object HTTP bodies overlap without changing the default pool", g => g.ConcurrentObjects()),
             ("v2 cancelled final GET preserves live files and state", g => g.Cancel(false)),
             ("v2 cancelled bookkeeping preserves state", g => g.Cancel(true)),
             ("v2 stale generation requests replan", g => g.StaleGeneration()),
@@ -76,6 +78,9 @@ internal static class Program
             ("r1 stale bundle repair explicit retry", g => g.StaleRepair(true)),
             ("r1 cancel blocked object read", g => g.CancelBody()),
             ("r1 cancel local hash", g => g.CancelHash()),
+            ("parallel local scan bounds and overlaps", g => g.ConcurrentLocalReads(precommit: false)),
+            ("parallel local precommit bounds and overlaps", g => g.ConcurrentLocalReads(precommit: true)),
+            ("parallel local cancellation joins readers", g => g.ConcurrentLocalReads(precommit: true, cancel: true)),
             ("r1 cancel object retry wait", g => g.CancelRetry()),
             ("r1 panel writer contends and retries against new ownership", g => g.PanelContender()),
             ("r1 final error body shares deadline", g => g.ErrorBodyDeadline()),
@@ -163,8 +168,11 @@ internal static class Program
         tests.Add(("r1 task5 pinned origin", g => g.SwappedPlan(true)));
         tests.Add(("r1 task5 appeared config preserved", g => g.Appeared(true)));
         tests.Add(("r1 task5 appeared DLL rejected", g => g.Appeared(false)));
-        tests.Add(("Wave staged truncation rolls back", g => g.StagedDrift("sh")));
-        tests.Add(("Wave staged same-length drift rolls back", g => g.StagedDrift("bad bytes")));
+        tests.Add(("v2 prepared install does not reopen the transfer cache", g => g.PreparedInstall(true)));
+        if (File.Exists("/proc/self/io"))
+            tests.Add(("v2 prepared install does not bulk-write during apply", g => g.PreparedInstall(false)));
+        tests.Add(("v2 staged truncation cannot change installed bytes", g => g.StagedDrift("sh")));
+        tests.Add(("v2 staged same-length drift cannot change installed bytes", g => g.StagedDrift("bad bytes")));
         tests.Add(("Wave republish during recovery replan", g => g.PostHashAdmission(true)));
         tests.Add(("Wave capacity drop during recovery", g => g.PostHashAdmission(false)));
         tests.Add(("r1 task5 bundle panel dispatch preserves dirty delta", g => g.DirtyBundleDispatch()));
@@ -224,6 +232,25 @@ internal static class Program
         public bool Optional;
         public List<(string Path, string Bytes)> Assets = new List<(string Path, string Bytes)>();
         public ManifestMod Add(string path, string bytes) { Assets.Add((path, bytes)); return this; }
+    }
+
+    private sealed class HeldWave : IDisposable
+    {
+        private readonly CountdownEvent _ready;
+        private readonly ManualResetEventSlim _release = new ManualResetEventSlim();
+        private int _entered;
+        public HeldWave(int size) => _ready = new CountdownEvent(size);
+        public int Entered => Volatile.Read(ref _entered);
+        public void Hold()
+        {
+            if (_release.IsSet) return;
+            if (Interlocked.Increment(ref _entered) <= _ready.InitialCount) _ready.Signal();
+            Check(_release.Wait(20_000), "held wave was not released");
+        }
+        public void WaitFor(string operation) => Check(_ready.Wait(8_000),
+            $"expected {_ready.InitialCount} simultaneous {operation}; observed {Entered}");
+        public void Release() => _release.Set();
+        public void Dispose() { _ready.Dispose(); _release.Dispose(); }
     }
 
     private sealed class GameFixture : IDisposable
@@ -708,6 +735,96 @@ internal static class Program
             Check(work.Wait(5000) && work.Result == SyncResult.Cancelled && chunks == 1, "hash cancellation lost or continued hashing after cancel");
             Check(ReadState() == before && ReadIfPresent(Old) == oldBytes && ReadIfPresent(First) == null && ReadIfPresent(Second) == null, "cancelled hashing mutated install");
             _server.ExpectObjects();
+        }
+
+        private static ManifestMod AssetBatch(string label, int count) => new ManifestMod { Id = Id, Assets = Enumerable.Range(0, count)
+            .Select(i => ($"BepInEx/plugins/fixture/{label}-{i}.dll", $"{label} payload {i}")).ToList() };
+
+        public void ConcurrentLocalReads(bool precommit, bool cancel = false)
+        {
+            Fresh();
+            var mod = AssetBatch("local", 5);
+            foreach (var asset in mod.Assets) Write(asset.Path, asset.Bytes);
+            var shared = new ManifestMod { Id = Id + 1, Assets = { mod.Assets[0] } };
+            _server.Publish(mod, shared);
+            var plan = Plan();
+            var progress = new SyncProgress();
+            var phase = precommit ? "Verifying" : "Checking installed files";
+            var seen = new ConcurrentQueue<string>();
+            var slots = cancel ? 2 : 4;
+            using var wave = new HeldWave(slots);
+            SetObserver(progress, "LocalHashChunk", (Action<string>)(path =>
+            {
+                if (progress.Snapshot().Phase != phase) return;
+                seen.Enqueue(path);
+                wave.Hold();
+            }));
+            var work = Task.Run(() => Execute(plan, progress));
+            try
+            {
+                wave.WaitFor(phase + " reads");
+                Check(!File.Exists(StateFile) && _server.CatalogRequests == 1, "published or applied before joining local reads");
+                if (cancel)
+                {
+                    Check(progress.TryCancel() && !work.IsCompleted, "cancellation left readers running beyond operation lifetime");
+                    var locked = false;
+                    try { SavePanelDelta(_engine); }
+                    catch (TargetInvocationException ex) when (ex.InnerException is IOException io && io.Message.Contains("holds this game root")) { locked = true; }
+                    Check(locked, "root lock not held while cancelled readers were still active");
+                }
+                else Check(wave.Entered == slots && seen.Distinct().Count() == slots, "wrong number of distinct local reads before release");
+            }
+            finally { wave.Release(); Check(work.Wait(10_000), "local readers did not join"); }
+            if (cancel)
+            {
+                Check(work.Result == SyncResult.Cancelled && !File.Exists(StateFile) && _server.CatalogRequests == 1,
+                    "cancelled scan reached publication or saved state");
+                Check(Run() == SyncResult.UpToDate, "root could not be reused after cancelled readers joined");
+            }
+            else
+            {
+                Check(work.Result == SyncResult.UpToDate, "parallel observation failed: " + progress.Error);
+                Check(seen.OrderBy(path => path).SequenceEqual(mod.Assets.Select(asset => asset.Path).OrderBy(path => path)),
+                    "matching shared path was read more than once in the phase, or another path was missed");
+                Check(progress.Snapshot().Scanned == 5 && progress.Snapshot().Expected == 5, "wrong installed-file progress");
+            }
+            _server.ExpectObjects();
+            var installed = ConvoyState.Load().Mods;
+            Check(mod.Assets.All(a => ReadIfPresent(a.Path) == a.Bytes) && installed.Count == 2
+                && installed.SelectMany(m => m.Files).All(f => f.Owned == false), "matching local bytes changed or became owned");
+        }
+
+        public void ConcurrentObjects()
+        {
+            var mod = AssetBatch("http", 9);
+            _server.Publish(mod);
+            var request = WebRequest.CreateHttp(new Uri(_server.Url));
+            request.Proxy = null;
+            var servicePoint = request.ServicePoint;
+            var originLimit = servicePoint.ConnectionLimit;
+            var defaultLimit = ServicePointManager.DefaultConnectionLimit;
+            bool SharedLimitsUnchanged() => servicePoint.ConnectionLimit == originLimit && ServicePointManager.DefaultConnectionLimit == defaultLimit;
+            var plan = Plan();
+            var progress = new SyncProgress();
+            using var wave = new HeldWave(8);
+            _server.Fault = "blocked-bodies";
+            _server.BodyPrefix = wave.Hold;
+            var work = Task.Run(() => Execute(plan, progress));
+            try
+            {
+                wave.WaitFor("HTTP object bodies");
+                Unchanged();
+                Check(mod.Assets.All(a => ReadIfPresent(a.Path) == null) && _server.CatalogRequests == 1,
+                    "live files or publication changed before the object bodies finished");
+                Check(wave.Entered == 8 && _server.ObjectRequestCount == 8, "a ninth object request entered before a slot freed");
+                Check(SharedLimitsUnchanged(), "Convoy changed a shared HTTP connection limit during download");
+            }
+            finally { wave.Release(); Check(work.Wait(15_000), "object workers did not join"); }
+            Check(work.Result == SyncResult.RestartRequired && mod.Assets.All(a => ReadIfPresent(a.Path) == a.Bytes),
+                "verified objects did not all install: " + progress.Error);
+            Check(SharedLimitsUnchanged(), "Convoy changed a shared HTTP connection limit");
+            _server.ExpectObjects(mod.Assets.Select(a => Sha(a.Bytes)).ToArray());
+            Console.WriteLine($"HTTP overlap: {wave.Entered} held bodies, {mod.Assets.Count} verified objects, shared limit {originLimit}/{defaultLimit} unchanged");
         }
 
         public void CancelRetry()
@@ -1505,6 +1622,46 @@ internal static class Program
             _server.ExpectObjects();
         }
 
+        private static long ProcessBytesWritten() => long.Parse(File.ReadLines("/proc/self/io")
+            .First(line => line.StartsWith("wchar:", StringComparison.Ordinal)).Substring(6));
+
+        public void PreparedInstall(bool removeCache)
+        {
+            Fresh();
+            _server.Publish(Required());
+            var initial = new SyncProgress();
+            Check(Execute(Plan(), initial) == SyncResult.RestartRequired, "owned fixture install failed: " + initial.Error);
+            var before = ReadState();
+            var body = new string('a', 256 * 1024);
+            var digest = Sha(body);
+            _server.Publish(new ManifestMod { Id = Id, Version = "prepared" }.Add(First, body).Add(Second, body));
+            long atFence = -1, afterPlacement = -1;
+            var reachedFence = false;
+            _server.Conditional = () =>
+            {
+                var cache = Directory.GetFiles(Path.GetDirectoryName(StateFile)!, "*-" + digest + "-*.data", SearchOption.AllDirectories).Single();
+                Check(new FileInfo(cache).Length == body.Length && ReadIfPresent(First) == "abc" && ReadIfPresent(Second) == null,
+                    "fixture did not reach the final fence with complete staged bytes and intact live files");
+                if (removeCache) File.Delete(cache);
+                else atFence = ProcessBytesWritten();
+                reachedFence = true;
+            };
+            var progress = new SyncProgress();
+            if (!removeCache)
+                SetObserver(progress, "BeforeStateSave", (Action)(() => afterPlacement = ProcessBytesWritten()));
+            var result = Execute(Plan(), progress);
+            Check(reachedFence && result == SyncResult.RestartRequired, "prepared placement failed: " + progress.Error);
+            Check(ReadIfPresent(First) == body && ReadIfPresent(Second) == body && ReadState() != before,
+                "prepared placement did not install both files and commit state");
+            if (!removeCache)
+            {
+                Check(atFence >= 0 && afterPlacement >= atFence && afterPlacement - atFence < body.Length,
+                    "apply rewrote payload bytes after the final fence: " + (afterPlacement - atFence));
+                Console.WriteLine($"Apply interval: {afterPlacement - atFence} process bytes written for two {body.Length}-byte files");
+            }
+            _server.ExpectObjects(digest);
+        }
+
         public void StagedDrift(string drift)
         {
             Fresh();
@@ -1523,10 +1680,21 @@ internal static class Program
             };
             var progress = new SyncProgress();
             var result = Execute(Plan(), progress);
-            Check(changed && result == SyncResult.Failed && progress.Error!.Contains("staged object"), "staged drift reached state commit");
-            Check(ReadState() == state && ReadIfPresent(First) == "abc" && ReadIfPresent(added) == null
-                && !Directory.Exists(Path.GetDirectoryName(Path.Combine(_root, added)))
-                && !Directory.EnumerateFiles(_root, "*.convoy-old-*", SearchOption.AllDirectories).Any(), "staged drift did not roll back live files/state");
+            Check(changed, "fixture did not change the cache after staging");
+            if (result == SyncResult.RestartRequired)
+            {
+                Check(ReadState() != state && ReadIfPresent(First) == "new bytes" && ReadIfPresent(added) == "extra bytes",
+                    "prepared placement installed changed cache bytes or did not commit");
+                Console.WriteLine("Late cache change did not affect prepared files");
+            }
+            else
+            {
+                Check(result == SyncResult.Failed && progress.Error!.Contains("staged object"), "verified-copy fallback did not reject cache drift");
+                Check(ReadState() == state && ReadIfPresent(First) == "abc" && ReadIfPresent(added) == null
+                    && !Directory.Exists(Path.GetDirectoryName(Path.Combine(_root, added))), "fallback did not roll back live files/state");
+                Console.WriteLine("Verified-copy fallback rejected late cache change");
+            }
+            Check(!Directory.EnumerateFiles(_root, "*.convoy-old-*", SearchOption.AllDirectories).Any(), "staged drift left a rollback backup");
             Check(File.ReadAllText(Directory.GetFiles(Path.GetDirectoryName(StateFile)!, "*-" + Sha("extra bytes") + "-11.data", SearchOption.AllDirectories).Single()) == "extra bytes", "valid staged object was lost");
         }
 
@@ -1711,6 +1879,7 @@ internal static class Program
         private int _busy;
         public void ExpectOnlyCatalog() => Check(_requests.SequenceEqual(new[] { Prefix + "catalog" }), "unexpected request on old publisher");
         public int CatalogRequests => _requests.Count(p => p == Prefix + "catalog");
+        public int ObjectRequestCount => _requests.Count(p => p.Contains("/objects/"));
         public readonly System.Collections.Concurrent.ConcurrentQueue<string> Ranges = new System.Collections.Concurrent.ConcurrentQueue<string>();
         public volatile string Fault = "";
         public volatile string FaultDigest = "";
@@ -1910,7 +2079,7 @@ internal static class Program
                 return;
             }
             response.ContentLength64 = bytes.LongLength;
-            if (fault == "blocked-body")
+            if (Fault == "blocked-bodies" || fault == "blocked-body")
             {
                 response.OutputStream.Write(bytes, 0, 2);
                 response.OutputStream.Flush();

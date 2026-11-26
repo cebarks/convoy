@@ -239,7 +239,8 @@ namespace Convoy
             if (partial.ETag != null && partial.Length == asset.Length) spool.Drop(asset);
         }
 
-        internal string Stage(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress, CancellationToken cancel, ManifestBudget manifestBudget)
+        internal string Stage(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress,
+            CancellationToken cancel, ManifestBudget manifestBudget, string connectionGroup, PreparedInstall? prepared)
         {
             if (spool.Origin != origin || !DeliveryManifest.Hex(generation, 64) || !DeliveryManifest.Hex(asset.Sha256, 64))
                 throw new InvalidDataException("Invalid Convoy object address");
@@ -247,7 +248,7 @@ namespace Convoy
             for (var attempt = 0; ; attempt++)
             {
                 cancel.ThrowIfCancellationRequested();
-                try { return StageOnce(origin, generation, asset, spool, progress, cancel, ref initialCacheBytes); }
+                try { return StageOnce(origin, generation, asset, spool, progress, cancel, connectionGroup, prepared, ref initialCacheBytes); }
                 catch (Exception ex)
                 {
                     progress?.ResetAttempt(asset.Sha256);
@@ -267,7 +268,8 @@ namespace Convoy
             }
         }
 
-        private static string StageOnce(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress, CancellationToken cancel, ref long initialCacheBytes)
+        private static string StageOnce(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress,
+            CancellationToken cancel, string connectionGroup, PreparedInstall? prepared, ref long initialCacheBytes)
         {
             var partial = spool.OpenPartial(asset);
             var reused = partial.Length;
@@ -275,7 +277,7 @@ namespace Convoy
             if (partial.ETag != null && reused == asset.Length)
             {
                 progress?.SetPhase("Verifying");
-                if (Measure(asset.Path, spool.DataPath(asset), cancel).Same(asset))
+                if (VerifyStaged(asset, spool, prepared, cancel))
                 {
                     progress?.Accept(asset.Sha256, initialCacheBytes, asset.Length - initialCacheBytes);
                     return partial.Path;
@@ -286,6 +288,7 @@ namespace Convoy
             }
 
             var request = Request(origin, $"/quma/convoy/v2/generations/{generation}/objects/{asset.Sha256}");
+            request.ConnectionGroupName = connectionGroup;
             request.Timeout = 30_000;
             if (reused > 0)
             {
@@ -343,7 +346,7 @@ namespace Convoy
                     spool.SaveCheckpoint(asset, tag, length);
             }
             progress?.SetPhase("Verifying");
-            if (!Measure(asset.Path, spool.DataPath(asset), cancel).Same(asset))
+            if (!VerifyStaged(asset, spool, prepared, cancel))
             {
                 initialCacheBytes = 0;
                 spool.Drop(asset);
@@ -354,21 +357,30 @@ namespace Convoy
             return partial.Path;
         }
 
+        private static bool VerifyStaged(DeliveryAsset asset, TransferSpool spool, PreparedInstall? prepared, CancellationToken cancel)
+        {
+            using var source = spool.OpenDataForRead(asset);
+            return prepared != null ? prepared.Verify(asset, source, cancel) : VerifyBytes(asset, source, cancel);
+        }
+
         internal static DeliveryAsset Measure(string path, string file, CancellationToken cancel = default, Action<string>? onChunk = null)
         {
             using var source = File.OpenRead(file);
-            return Measure(path, source, cancel, onChunk);
+            return Measure(path, source, cancel, onChunk)!;
         }
 
-        // Apply is already live: finish or roll back, never cancel mid-transaction.
+        internal static bool VerifyBytes(DeliveryAsset expected, Stream source, CancellationToken cancel, Action<byte[], int>? write = null) =>
+            Measure(expected.Path, source, cancel, null, write, expected.Length)?.Same(expected) == true;
+
+        // Compatibility path for filesystems where we cannot hold prepared output private until placement.
         internal static void CopyVerified(DeliveryAsset expected, Stream source, Stream output)
         {
-            if (!Measure(expected.Path, source, default, null, output, expected.Length).Same(expected))
+            if (!VerifyBytes(expected, source, default, (buffer, count) => output.Write(buffer, 0, count)))
                 throw new IOException("Verified staged object changed before install: " + expected.Path);
         }
 
-        private static DeliveryAsset Measure(string path, Stream stream, CancellationToken cancel, Action<string>? onChunk,
-            Stream? output = null, long maxLength = long.MaxValue)
+        private static DeliveryAsset? Measure(string path, Stream stream, CancellationToken cancel, Action<string>? onChunk,
+            Action<byte[], int>? write = null, long maxLength = long.MaxValue)
         {
             var buffer = new byte[BufferSize];
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -379,9 +391,9 @@ namespace Convoy
             while ((count = stream.Read(buffer, 0, buffer.Length)) > 0)
             {
                 cancel.ThrowIfCancellationRequested();
-                if (count > maxLength - total) throw new IOException("Verified staged object exceeds expected length: " + path);
+                if (count > maxLength - total) return null;
                 total += count;
-                output?.Write(buffer, 0, count);
+                write?.Invoke(buffer, count);
                 sha.AppendData(buffer, 0, count);
                 xxh.Append(buffer.AsSpan(0, count));
                 onChunk?.Invoke(path);
