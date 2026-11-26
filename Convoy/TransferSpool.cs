@@ -35,8 +35,6 @@ namespace Convoy
         private TransferSpool(string gameRoot, Uri origin, long maxBytes)
         {
             _root = Path.GetFullPath(gameRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            for (var parent = new DirectoryInfo(_root); parent != null; parent = parent.Parent)
-                if ((parent.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("Linked game root or ancestor");
             _paths = new SyncFiles(_root, Array.Empty<ModState>());
             Origin = origin;
             _maxBytes = maxBytes;
