@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.ExceptionServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Linq;
 
 namespace Convoy
@@ -18,6 +20,7 @@ namespace Convoy
         private readonly Dictionary<string, string> _recovery = new Dictionary<string, string>(StringComparer.Ordinal);
         private readonly List<string> _verifiedRecovery = new List<string>();
         private const string RecoveryDirectory = "BepInEx/config/Convoy/recovery";
+        private const int LocalReadWorkers = 4;
         private readonly List<string> _deletes = new List<string>();
 
         internal static bool Allowed(string path)
@@ -117,18 +120,47 @@ namespace Convoy
                 foreach (var parent in Parents(f.Key))
                     keptDirectories[parent] = parent;
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var indices = new Dictionary<string, int>(StringComparer.Ordinal);
+            var reads = new List<(string Path, bool Cached, DeliveryAsset? Prior)>();
+            void AddRead(string path)
+            {
+                if (indices.ContainsKey(path)) return;
+                indices.Add(path, reads.Count);
+                reads.Add((path, _observed.TryGetValue(path, out var prior), prior));
+            }
+            foreach (var path in incoming.Keys)
+            {
+                Cancel.ThrowIfCancellationRequested();
+                if (keptDirectories.ContainsKey(path) || Parents(path).Any(p => kept.Contains(p)
+                    || (keptDirectories.TryGetValue(p, out var spelling) && spelling != p)))
+                    throw new InvalidOperationException("Incoming path conflicts with a retained mod: " + path);
+                if (!names.Add(path)) throw new InvalidOperationException("Colliding sync path: " + path);
+                AddRead(path);
+            }
+            var incomingCount = reads.Count;
+            var retiring = removed.Where(file => !kept.Contains(file.Path) && !incoming.ContainsKey(file.Path) && Owns(file)
+                && !Configuration(file.Path) && !Private(file.Path)).ToArray();
+            foreach (var file in retiring) AddRead(file.Path);
+            var observations = ReadBatch(reads.Count, i =>
+            {
+                var (path, cached, prior) = reads[i];
+                if (i < incomingCount) Progress?.BeforeLocalObservation?.Invoke(path);
+                var actual = cached ? prior : Read(path);
+                if (i < incomingCount) Progress?.Scan();
+                return actual;
+            });
+            DeliveryAsset? Consume(string path)
+            {
+                var observation = observations[indices[path]];
+                observation.Error?.Throw();
+                return _observed[path] = observation.Value;
+            }
             foreach (var pair in incoming)
             {
-                if (keptDirectories.ContainsKey(pair.Key) || Parents(pair.Key).Any(p => kept.Contains(p)
-                    || (keptDirectories.TryGetValue(p, out var spelling) && spelling != p)))
-                    throw new InvalidOperationException("Incoming path conflicts with a retained mod: " + pair.Key);
-                if (!names.Add(pair.Key)) throw new InvalidOperationException("Colliding sync path: " + pair.Key);
                 _old.TryGetValue(pair.Key, out var old);
                 var owned = old != null && Owns(old);
-                Progress?.BeforeLocalObservation?.Invoke(pair.Key);
-                var actual = Observe(pair.Key);
+                var actual = Consume(pair.Key);
                 var exists = actual != null;
-                Progress?.Scan();
                 var matches = actual?.Same(pair.Value) == true;
                 var oldMatches = old != null && actual != null && StoredMatches(actual, old);
                 var preserveConfig = exists && Configuration(pair.Key);
@@ -152,15 +184,30 @@ namespace Convoy
                     if (!matches) _writes.Add(pair.Key);
                 }
             }
-            foreach (var file in removed)
-            {
-                if (!kept.Contains(file.Path) && !incoming.ContainsKey(file.Path) && Owns(file)
-                    && !Configuration(file.Path) && !Private(file.Path) && Observe(file.Path) is DeliveryAsset actual
-                    && StoredMatches(actual, file))
-                {
+            foreach (var file in retiring)
+                if (Consume(file.Path) is DeliveryAsset actual && StoredMatches(actual, file))
                     _deletes.Add(file.Path);
-                }
-            }
+        }
+
+        private (T Value, ExceptionDispatchInfo? Error)[] ReadBatch<T>(int count, Func<int, T> read)
+        {
+            Cancel.ThrowIfCancellationRequested();
+            var results = new (T Value, ExceptionDispatchInfo? Error)[count];
+            if (count == 1) results[0].Value = read(0);
+            else if (count > 1)
+                Parallel.For(0, count, new ParallelOptions { MaxDegreeOfParallelism = LocalReadWorkers,
+                    CancellationToken = Cancel, TaskScheduler = TaskScheduler.Default }, (i, loop) =>
+                {
+                    try { results[i].Value = read(i); }
+                    catch (Exception ex)
+                    {
+                        // Finish earlier observations, then surface failures in input order on the caller.
+                        results[i].Error = ExceptionDispatchInfo.Capture(ex);
+                        loop.Break();
+                    }
+                });
+            Cancel.ThrowIfCancellationRequested();
+            return results;
         }
 
         private static IEnumerable<string> Parents(string path)
@@ -225,16 +272,23 @@ namespace Convoy
         internal void ApplyWithPrecommit(Action<string, Stream> copyStaged, Action saveState,
             Action requirePublication, Action requireStateAndOrigin, Action requireFinalAdmission)
         {
-            var identities = new Dictionary<string, (long Length, DateTime Modified, DateTime Created)?>();
-            foreach (var observation in _observed)
+            var originals = _observed.ToArray();
+            var rechecked = ReadBatch(originals.Length, i =>
             {
+                var observation = originals[i];
                 var before = Identity(observation.Key);
                 var actual = Read(observation.Key);
                 var after = Identity(observation.Key);
                 if (!Nullable.Equals(before, after) || (actual == null ? observation.Value != null
                     : observation.Value == null || !actual.Same(observation.Value)))
                     throw new IOException("File changed during sync preflight: " + observation.Key);
-                identities.Add(observation.Key, after);
+                return after;
+            });
+            var identities = new Dictionary<string, (long Length, DateTime Modified, DateTime Created)?>();
+            for (var i = 0; i < originals.Length; i++)
+            {
+                rechecked[i].Error?.Throw();
+                identities.Add(originals[i].Key, rechecked[i].Value);
             }
             try
             {

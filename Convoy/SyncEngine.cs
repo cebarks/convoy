@@ -85,6 +85,7 @@ namespace Convoy
     public class SyncEngine
     {
         private const string StatePath = "BepInEx/config/Convoy/state.json";
+        private const int DownloadWorkers = 8;
         private readonly ManualLogSource _log;
         private readonly ConvoyConfig _config;
         private readonly string _gameRoot;
@@ -428,15 +429,17 @@ namespace Convoy
             progress?.Plan(unique.Sum(a => a.Length));
             var manifestBudget = _delivery.NewManifestBudget();
             var failures = new ConcurrentQueue<Exception>();
-            var workerCount = Math.Min(4, unique.Length);
+            var workerCount = Math.Min(DownloadWorkers, unique.Length);
             var next = workerCount - 1;
             var workers = Enumerable.Range(0, workerCount).Select(first => Task.Run(() =>
             {
+                // Each worker reuses its own slot without changing the game's ServicePoint limits.
+                var connectionGroup = "io.cebarks.convoy.objects." + first.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 for (var i = first; ; i = Interlocked.Increment(ref next))
                 {
                     if (i >= unique.Length) return;
                     var asset = unique[i];
-                    try { _delivery.Stage(origin, catalog.Generation, asset, spool, progress, cancel, manifestBudget); }
+                    try { _delivery.Stage(origin, catalog.Generation, asset, spool, progress, cancel, manifestBudget, connectionGroup); }
                     catch (Exception ex) { failures.Enqueue(ex); return; }
                     if (!failures.IsEmpty) return;
                 }

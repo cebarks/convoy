@@ -239,7 +239,8 @@ namespace Convoy
             if (partial.ETag != null && partial.Length == asset.Length) spool.Drop(asset);
         }
 
-        internal string Stage(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress, CancellationToken cancel, ManifestBudget manifestBudget)
+        internal string Stage(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress,
+            CancellationToken cancel, ManifestBudget manifestBudget, string connectionGroup)
         {
             if (spool.Origin != origin || !DeliveryManifest.Hex(generation, 64) || !DeliveryManifest.Hex(asset.Sha256, 64))
                 throw new InvalidDataException("Invalid Convoy object address");
@@ -247,7 +248,7 @@ namespace Convoy
             for (var attempt = 0; ; attempt++)
             {
                 cancel.ThrowIfCancellationRequested();
-                try { return StageOnce(origin, generation, asset, spool, progress, cancel, ref initialCacheBytes); }
+                try { return StageOnce(origin, generation, asset, spool, progress, cancel, connectionGroup, ref initialCacheBytes); }
                 catch (Exception ex)
                 {
                     progress?.ResetAttempt(asset.Sha256);
@@ -267,7 +268,8 @@ namespace Convoy
             }
         }
 
-        private static string StageOnce(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress, CancellationToken cancel, ref long initialCacheBytes)
+        private static string StageOnce(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress,
+            CancellationToken cancel, string connectionGroup, ref long initialCacheBytes)
         {
             var partial = spool.OpenPartial(asset);
             var reused = partial.Length;
@@ -286,6 +288,7 @@ namespace Convoy
             }
 
             var request = Request(origin, $"/quma/convoy/v2/generations/{generation}/objects/{asset.Sha256}");
+            request.ConnectionGroupName = connectionGroup;
             request.Timeout = 30_000;
             if (reused > 0)
             {

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Check and re-verify installed files with up to four parallel readers and download up to eight distinct objects at a time. Verified installation and rollback remain serial.
+
 ### Breaking
 
 - Require a paired Convoy v2 Quartermaster publisher. Sync and repair stream verified, resumable file objects without legacy ZIP fallback. Install the standalone client package with the game closed.
