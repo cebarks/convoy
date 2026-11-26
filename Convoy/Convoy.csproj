@@ -12,7 +12,6 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <Reference Include="System.IO.Compression"/>
         <Reference Include="BepInEx">
             <HintPath>$(TarkovBepInExCoreDir)BepInEx.dll</HintPath>
         </Reference>

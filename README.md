@@ -4,16 +4,16 @@ BepInEx 5 plugin for [SPT](https://www.sp-tarkov.com/) that syncs client-side mo
 
 ## How it works
 
-1. Fetches the mod catalog from your Quartermaster server (with ETag caching)
+1. Fetches and validates the v2 catalog and pins its origin and generation
 2. Diffs against local state to determine what needs to be installed, updated, or removed
-3. Downloads changed mods as a batch ZIP and stages only catalog-listed files. Every requested file must be present and match its xxHash3 checksum before files or sync state are changed.
+3. Streams only missing or changed objects, reuses verified local bytes and resumes validated partial transfers. Sizes and SHA-256 must match before files or sync state are changed. Sync and repair never use a mod ZIP.
 4. Prompts for a restart if any BepInEx plugin files changed (they're already loaded by the time Convoy runs)
 
 Optional mod groups are toggled via BepInEx Configuration Manager (F12 in-game).
 
 ## Supported files and ownership
 
-Sync supports canonical `BepInEx/` paths, package dependency DLLs directly under `EscapeFromTarkov_Data/Managed/`, and existing SPT bundle-cache exports. Other game-root paths, traversal, drive paths, backslashes, Windows aliases, case collisions and symlink/reparse destinations are rejected before mutation. Missing, corrupt, duplicate or unadvertised archive contents abort the operation without deleting installed files or committing state.
+Sync supports canonical `BepInEx/` paths, package dependency DLLs directly under `EscapeFromTarkov_Data/Managed/`, and existing SPT bundle-cache exports. Other game-root paths, traversal, drive paths, backslashes, Windows aliases, case collisions and symlink/reparse destinations are rejected before mutation. Missing, corrupt, duplicate or conflicting delivery identities abort the operation without deleting installed files or committing state.
 
 Existing matching files are usable without being adopted: state records `owned: false`. Differing unowned files and locally modified assemblies cause a conflict rather than an overwrite. Existing `BepInEx/config/` files are preserved, including when package defaults change. Only unchanged owned files no longer needed by any selected mod are removed. Shared dependencies survive removal of one owner. Legacy state ownership applies only to BepInEx, never Managed assemblies. Same-version advertised manifest changes trigger synchronization.
 
@@ -21,27 +21,25 @@ File replacement/deletion is preflighted and rolled back on ordinary I/O failure
 
 ### Coordinated publisher upgrade
 
-There is no capability handshake. Release this client as a distinct mod version, upgrade it via the old publisher's existing BepInEx-only Convoy bootstrap/self-update operation, and restart clients **before** enabling Managed publication. Do not combine dependency-bearing mod updates with the bootstrap. Old clients accept roots without these ownership protections and miss same-version manifest changes. New clients reject old-server archives with unadvertised dependencies, so dependency installations must wait until publisher rollout finishes. BepInEx-only old-server archives remain supported. Mixed-version enforcement requires a separately reviewed protocol policy; these changes do not silently omit dependencies to accommodate old clients.
+Upgrade this client and Quartermaster as a pair. A v2 client on a legacy publisher stops and shows the upgrade instruction without attempting legacy downloads or changing live files. An old client cannot use v2 delivery. Do not depend on self-update to cross this boundary. The existing setup ZIP is separate, not a safe overlay installer for a populated game directory.
 
-The independent player setup ZIP can include the dependency DLLs, but is not a safe overlay installer for populated game directories. Existing setup-installed or manually repaired matching DLLs remain unowned. No game reference assemblies are distributed in source tests.
+Before cutover, preserve the previous binaries, server config and compatible database and the client plugin/configuration/ownership state. Roll back both ends with their compatible data, not by running old software against new state.
 
 ## Installation
 
-Copy the contents of `Build/BepInEx/plugins/Convoy/` (includes `Convoy.dll` and `System.IO.Hashing.dll`) to `BepInEx/plugins/Convoy/` in your SPT install directory.
+Close the game. Install the standalone v2 package under `BepInEx/plugins/Convoy/`. For a local source build with `DeployAfterBuild=false`, the two inputs are `Convoy/bin/Release/Convoy.dll` and `Convoy/bin/Release/System.IO.Hashing.dll`, placed at `BepInEx/plugins/Convoy/Convoy.dll` and `BepInEx/plugins/Convoy/System.IO.Hashing.dll` in the package. Do not include game assemblies or regression artifacts. This is not a claim that a v2 build has been published. Release naming and tagging are separate operator decisions; the project derives the plugin version from Git tags.
 
-On first run, Convoy creates its config at `BepInEx/config/io.cebarks.convoy.cfg` — set `ServerUrl` to your Quartermaster instance (e.g. `http://192.168.1.50:9190`).
+Convoy uses the active SPT server origin. Keep existing client configuration. Allow room for private transfer staging and temporary apply/rollback copies. Retry/relaunch after an interruption; a verified completed object is not fetched again. Let the server finish initial publication, and ask the administrator to rehash and republish following out-of-band content edits.
 
 ## Building
 
 Requires .NET SDK (targets net472).
 
 ```bash
-dotnet build                              # debug build
-dotnet build -c Release                   # release build
-dotnet build -p:TarkovDir=/path/to/spt/   # override game path
+dotnet build Convoy/Convoy.csproj -c Release -p:TarkovDir=/path/to/spt/ -p:DeployAfterBuild=false
 ```
 
-Build output: `Build/BepInEx/plugins/Convoy/Convoy.dll`
+See the standalone package layout above. The safe local build does not deploy to a game installation.
 
 By default the project resolves game DLLs by looking two directories up from the project root (assumes you cloned inside the SPT directory tree). Set `TarkovDir` or the `TARKOV_DIR` env var to override.
 

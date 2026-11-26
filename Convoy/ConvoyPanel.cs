@@ -22,15 +22,18 @@ namespace Convoy
 
         private ConvoyState _state = new ConvoyState();
         private SyncOutcome? _outcome;
-        private Catalog? _catalog;
+        private DeliveryManifest? _catalog;
 
         // Group collapse state (shared across tabs)
         private readonly Dictionary<string, bool> _groupCollapsed = new Dictionary<string, bool>();
 
         // Mods tab: per-mod checkbox state
-        private readonly Dictionary<int, bool> _modChecked = new Dictionary<int, bool>();
+        private readonly Dictionary<long, bool> _modChecked = new Dictionary<long, bool>();
         private bool _modsDirty;
         private bool _stateDirty;
+        private bool _deferDraftFlush;
+        private HashSet<string> _savedGroups = new HashSet<string>();
+        private HashSet<long> _savedSkips = new HashSet<long>();
 
         // Scroll positions per tab
         private Vector2 _statusScroll;
@@ -78,16 +81,39 @@ namespace Convoy
             _isInRaid = isInRaid;
         }
 
-        public void UpdateState(ConvoyState state)
+        public void UpdateState(ConvoyState state) => RefreshState(state, preserveDraft: false);
+
+        internal void RefreshState(ConvoyState state, bool preserveDraft)
         {
+            var savedGroups = new HashSet<string>(state.EnabledGroups);
+            var savedSkips = new HashSet<long>(state.SkippedMods);
+            if (preserveDraft && _stateDirty)
+            {
+                // Reapply only the user's pending edits to the new durable selection.
+                state.EnabledGroups.UnionWith(_state.EnabledGroups.Except(_savedGroups));
+                state.EnabledGroups.ExceptWith(_savedGroups.Except(_state.EnabledGroups));
+                state.SkippedMods.UnionWith(_state.SkippedMods.Except(_savedSkips));
+                state.SkippedMods.ExceptWith(_savedSkips.Except(_state.SkippedMods));
+                _stateDirty = !state.EnabledGroups.SetEquals(savedGroups) || !state.SkippedMods.SetEquals(savedSkips);
+            }
+            else
+            {
+                _stateDirty = false;
+                if (!preserveDraft)
+                {
+                    _modsDirty = false;
+                    _deferDraftFlush = false;
+                }
+            }
             _state = state;
-            _modsDirty = false;
+            _savedGroups = savedGroups;
+            _savedSkips = savedSkips;
             RebuildModChecks();
         }
 
         public void UpdateOutcome(SyncOutcome outcome) => _outcome = outcome;
 
-        public void UpdateCatalog(Catalog? catalog) => _catalog = catalog;
+        public void UpdateCatalog(DeliveryManifest? catalog) => _catalog = catalog;
 
         public void Close() => _open = false;
 
@@ -97,12 +123,31 @@ namespace Convoy
                 _open = !_open;
         }
 
-        // Called from Update(), not OnGUI() — avoids disk writes on every IMGUI repaint
-        public void FlushIfDirty()
+        internal void DeferDraftFlush() => _deferDraftFlush = true;
+
+        internal void FlushAutomaticSelection(SyncEngine engine)
+        {
+            if (!_deferDraftFlush) FlushIfDirty(engine);
+        }
+
+        private void SelectionEdited()
+        {
+            _deferDraftFlush = false;
+            _modsDirty = true;
+            _stateDirty = true;
+        }
+
+        // Save only an independent user edit, not a side effect of a bundle action.
+        internal void FlushIfDirty(SyncEngine engine)
         {
             if (!_stateDirty) return;
+            engine.SavePanelSelection(
+                _state.EnabledGroups.Except(_savedGroups), _savedGroups.Except(_state.EnabledGroups),
+                _state.SkippedMods.Except(_savedSkips), _savedSkips.Except(_state.SkippedMods));
             _stateDirty = false;
-            _state.Save();
+            _deferDraftFlush = false;
+            _savedGroups = new HashSet<string>(_state.EnabledGroups);
+            _savedSkips = new HashSet<long>(_state.SkippedMods);
         }
 
         private void RebuildModChecks()
@@ -239,6 +284,7 @@ namespace Convoy
         {
             switch (result)
             {
+                case SyncResult.Applied:
                 case SyncResult.UpToDate: return _greenValueStyle!;
                 case SyncResult.RestartRequired: return _yellowValueStyle!;
                 case SyncResult.Failed: return _redValueStyle!;
@@ -267,11 +313,14 @@ namespace Convoy
                 var statusLabel = _outcome.Result switch
                 {
                     SyncResult.UpToDate => "Up to date",
+                     SyncResult.Applied => "Updated",
                     SyncResult.RestartRequired => "Updated — restart required",
                     SyncResult.Failed => "Failed",
                     _ => "Unknown"
                 };
                 lines.Add(("Last Sync", statusLabel, StatusValueStyle(_outcome.Result)));
+                if (_outcome.Recovery != null)
+                    lines.Add(("Recovery", _outcome.Recovery, _infoValueStyle!));
                 if (_outcome.Result == SyncResult.Failed && !string.IsNullOrEmpty(_outcome.Error))
                     lines.Add(("Error", _outcome.Error!, _redValueStyle!));
             }
@@ -337,7 +386,7 @@ namespace Convoy
             if (_catalog == null) return;
             float y = startY;
 
-            var installedIds = new HashSet<int>(_state.Mods.Select(m => m.Id));
+            var installedIds = new HashSet<long>(_state.Mods.Select(m => m.Id));
             var installedVersions = _state.Mods.ToDictionary(m => m.Id);
 
             foreach (var group in _catalog.Groups.OrderBy(g => g.Tier == "required" ? 0 : 1).ThenBy(g => g.Name))
@@ -423,8 +472,7 @@ namespace Convoy
                         else
                             _state.EnabledGroups.Remove(slug);
                         RebuildModChecks();
-                        _modsDirty = true;
-                        _stateDirty = true;
+                        SelectionEdited();
                     }
                 }
                 y += LineHeight;
@@ -464,8 +512,7 @@ namespace Convoy
                                         _state.SkippedMods.Remove(mod.Id);
                                     else
                                         _state.SkippedMods.Add(mod.Id);
-                                    _modsDirty = true;
-                                    _stateDirty = true;
+                                    SelectionEdited();
                                 }
                             }
                         }
@@ -513,7 +560,7 @@ namespace Convoy
         {
             if (_catalog == null) return 0f;
             float height = 0f;
-            var installedIds = new HashSet<int>(_state.Mods.Select(m => m.Id));
+            var installedIds = new HashSet<long>(_state.Mods.Select(m => m.Id));
 
             foreach (var group in _catalog.Groups)
             {

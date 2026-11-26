@@ -11,13 +11,19 @@ namespace Convoy
 
         public ConfigEntry<KeyboardShortcut>? PanelKeybind { get; private set; }
 
+        private readonly ConfigEntry<long> _spoolMaxBytes;
+
         public ConvoyConfig(ConfigFile config)
         {
             _config = config;
+            _spoolMaxBytes = config.Bind("Convoy", "Spool Max Bytes", TransferSpool.DefaultMaxBytes,
+                "Maximum bytes for the private transfer cache (rollback is budgeted separately).");
             PanelKeybind = _config.Bind("Convoy", "Panel Keybind",
                 new KeyboardShortcut(KeyCode.F10),
                 "Keybind to toggle the Convoy panel");
         }
+
+        public long SpoolMaxBytes { get => _spoolMaxBytes.Value; set => _spoolMaxBytes.Value = value; }
 
         public List<CachedGroup> RegisterOptionalGroups(List<CatalogGroup> groups)
         {

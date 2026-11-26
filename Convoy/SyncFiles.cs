@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Hashing;
+using System.Threading;
 using System.Linq;
 
 namespace Convoy
@@ -12,8 +12,12 @@ namespace Convoy
         private readonly string _root;
         private readonly Dictionary<string, ModFileState> _old = new Dictionary<string, ModFileState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, bool> _ownership = new Dictionary<string, bool>(StringComparer.Ordinal);
-        private readonly Dictionary<string, string?> _observed = new Dictionary<string, string?>();
+        private readonly Dictionary<string, DeliveryAsset?> _observed = new Dictionary<string, DeliveryAsset?>();
+        private readonly HashSet<string> _verified = new HashSet<string>(StringComparer.Ordinal);
         private readonly List<string> _writes = new List<string>();
+        private readonly Dictionary<string, string> _recovery = new Dictionary<string, string>(StringComparer.Ordinal);
+        private readonly List<string> _verifiedRecovery = new List<string>();
+        private const string RecoveryDirectory = "BepInEx/config/Convoy/recovery";
         private readonly List<string> _deletes = new List<string>();
 
         internal static bool Allowed(string path)
@@ -23,30 +27,36 @@ namespace Convoy
             {
                 if (part.Length == 0 || part == "." || part == ".." || part.EndsWith(".") || part.EndsWith(" ") || part.Any(char.IsControl)) return false;
                 var stem = part.Split('.')[0].ToUpperInvariant();
-                if (new[] { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" }.Contains(stem)) return false;
+                if (DeviceNames.Contains(stem)) return false;
             }
             const string managed = "EscapeFromTarkov_Data/Managed/";
             return path.StartsWith("BepInEx/", StringComparison.Ordinal)
                 || (path.StartsWith(managed, StringComparison.Ordinal) && path.Substring(managed.Length).IndexOf('/') < 0 && path.EndsWith(".dll", StringComparison.Ordinal) && path.Length > managed.Length + 4)
-                || path.StartsWith("SPT/user/cache/bundles/", StringComparison.Ordinal)
-                || path.StartsWith("SPT_Runtime/user/cache/bundles/", StringComparison.Ordinal);
+                || Bundle(path);
         }
 
-        internal static string Hash(string path)
+        internal static bool Bundle(string path) => path.StartsWith("SPT/user/cache/bundles/", StringComparison.Ordinal)
+            || path.StartsWith("SPT_Runtime/user/cache/bundles/", StringComparison.Ordinal);
+
+        internal static bool Private(string path) => path.Equals("BepInEx/config/Convoy", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("BepInEx/config/Convoy/", StringComparison.OrdinalIgnoreCase);
+
+        private static readonly HashSet<string> DeviceNames = new HashSet<string>(StringComparer.Ordinal)
         {
-            var hash = new XxHash3();
-            using (var stream = File.OpenRead(path)) hash.Append(stream);
-            return hash.GetCurrentHashAsUInt64().ToString("x16");
-        }
+            "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        };
 
         private static bool Owns(ModFileState file) => file.Owned ?? file.Path.StartsWith("BepInEx/", StringComparison.Ordinal);
-        private static bool Configuration(string path) => path.StartsWith("BepInEx/config/", StringComparison.Ordinal);
+        internal static bool Configuration(string path) => path.StartsWith("BepInEx/config/", StringComparison.Ordinal);
 
         internal SyncFiles(string root, IEnumerable<ModState> current)
         {
             _root = Path.GetFullPath(root);
             foreach (var file in current.SelectMany(m => m.Files))
             {
+                if (Private(file.Path)) throw new InvalidOperationException("Private path in Convoy install record: " + file.Path);
                 Resolve(file.Path);
                 if (_old.TryGetValue(file.Path, out var prior))
                 {
@@ -60,6 +70,12 @@ namespace Convoy
         internal string Resolve(string path)
         {
             if (!Allowed(path)) throw new InvalidOperationException("Unsupported sync path: " + path);
+            return ResolvePath(path);
+        }
+
+        // Parent paths are obtained only from fully validated file paths.
+        private string ResolvePath(string path)
+        {
             var cursor = _root;
             if ((File.GetAttributes(cursor) & FileAttributes.ReparsePoint) != 0) throw new InvalidOperationException("Linked game root");
             foreach (var part in path.Split('/'))
@@ -83,71 +99,252 @@ namespace Convoy
             return cursor;
         }
 
-        internal void Preflight(Dictionary<string, string> incoming, IEnumerable<string> retained,
-            IEnumerable<ModFileState> removed)
+        internal Action? AdvanceEpoch { private get; set; }
+        internal SyncProgress? Progress { private get; set; }
+        internal CancellationToken Cancel { private get; set; }
+
+        internal void Preflight(Dictionary<string, DeliveryAsset> incoming, IEnumerable<ModFileState> retained,
+            IEnumerable<ModFileState> removed) => PreflightWithConsent(incoming, retained, removed, null, false);
+
+        internal void PreflightWithConsent(Dictionary<string, DeliveryAsset> incoming, IEnumerable<ModFileState> retained,
+            IEnumerable<ModFileState> removed, Func<DeliveryAsset, DeliveryAsset, bool>? approved, bool repair)
         {
+            Progress?.SetPhase("Checking installed files");
+            Progress?.Expect(incoming.Count);
+            var kept = retained.ToLookup(f => f.Path, StringComparer.OrdinalIgnoreCase);
+            var keptDirectories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in kept)
+                foreach (var parent in Parents(f.Key))
+                    keptDirectories[parent] = parent;
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var pair in incoming)
             {
-                var dst = Resolve(pair.Key);
+                if (keptDirectories.ContainsKey(pair.Key) || Parents(pair.Key).Any(p => kept.Contains(p)
+                    || (keptDirectories.TryGetValue(p, out var spelling) && spelling != p)))
+                    throw new InvalidOperationException("Incoming path conflicts with a retained mod: " + pair.Key);
                 if (!names.Add(pair.Key)) throw new InvalidOperationException("Colliding sync path: " + pair.Key);
-                if (Directory.Exists(dst)) throw new InvalidOperationException("Directory at file path: " + pair.Key);
                 _old.TryGetValue(pair.Key, out var old);
-                var exists = File.Exists(dst);
                 var owned = old != null && Owns(old);
-                var actual = exists ? Hash(dst) : null;
-                _observed[pair.Key] = actual;
-                if (exists && actual != pair.Value && !Configuration(pair.Key)
-                    && (!owned || actual != old!.Hash))
-                    throw new InvalidOperationException("Local file ownership conflict: " + pair.Key);
+                Progress?.BeforeLocalObservation?.Invoke(pair.Key);
+                var actual = Observe(pair.Key);
+                var exists = actual != null;
+                Progress?.Scan();
+                var matches = actual?.Same(pair.Value) == true;
+                var oldMatches = old != null && actual != null && StoredMatches(actual, old);
+                var preserveConfig = exists && Configuration(pair.Key);
+                foreach (var file in kept[pair.Key])
+                    if (file.Path != pair.Key || (!preserveConfig && (!StoredMatches(pair.Value, file)
+                        || (exists && !matches))))
+                        throw new InvalidOperationException("Incoming asset conflicts with a retained mod: " + pair.Key);
+                if (exists && !matches && !preserveConfig && (!owned || !oldMatches))
+                {
+                    if (kept.Contains(pair.Key) || approved?.Invoke(pair.Value, actual!) != true)
+                        throw new InvalidOperationException("Local file ownership conflict: " + pair.Key);
+                    _recovery.Add(pair.Key, RecoveryDirectory + "/" + Guid.NewGuid().ToString("N") + ".dll");
+                }
+                if (repair && !exists && old != null && !owned && !Configuration(pair.Key))
+                    throw new InvalidOperationException("Missing unowned file; restore it or use normal sync: " + pair.Key);
                 // Existing configurations are user-controlled, even if previously tracked.
-                _ownership[pair.Key] = !Configuration(pair.Key) && (!exists || (owned && actual == old!.Hash));
-                if (!exists || (actual != pair.Value && !Configuration(pair.Key))) _writes.Add(pair.Key);
+                _ownership[pair.Key] = !Configuration(pair.Key) && (!exists ? !kept[pair.Key].Any(f => !Owns(f)) : owned && oldMatches);
+                if (!preserveConfig)
+                {
+                    _verified.Add(pair.Key);
+                    if (!matches) _writes.Add(pair.Key);
+                }
             }
-            var keep = new HashSet<string>(retained, StringComparer.OrdinalIgnoreCase);
             foreach (var file in removed)
             {
-                var path = Resolve(file.Path);
-                if (!keep.Contains(file.Path) && !incoming.ContainsKey(file.Path) && Owns(file)
-                    && !Configuration(file.Path) && File.Exists(path) && Hash(path) == file.Hash)
+                if (!kept.Contains(file.Path) && !incoming.ContainsKey(file.Path) && Owns(file)
+                    && !Configuration(file.Path) && !Private(file.Path) && Observe(file.Path) is DeliveryAsset actual
+                    && StoredMatches(actual, file))
                 {
-                    _observed[file.Path] = file.Hash;
                     _deletes.Add(file.Path);
                 }
             }
         }
 
-        internal ModFileState Record(string path, string hash) => new ModFileState
+        private static IEnumerable<string> Parents(string path)
         {
-            Path = path, Hash = hash, Owned = _ownership[path]
+            for (var end = path.LastIndexOf('/'); end > 0; end = path.LastIndexOf('/', end - 1))
+                yield return path.Substring(0, end);
+        }
+
+        private static bool StoredMatches(DeliveryAsset actual, ModFileState file) => actual.Xxh3_64 == file.Hash
+            && (file.Sha256 == null || actual.Sha256 == file.Sha256) && (!file.Length.HasValue || actual.Length == file.Length.Value);
+
+        internal DeliveryAsset? Observe(string path)
+        {
+            if (_observed.TryGetValue(path, out var stored)) return stored;
+            return _observed[path] = Read(path);
+        }
+
+        private DeliveryAsset? Read(string path)
+        {
+            Cancel.ThrowIfCancellationRequested();
+            var target = Resolve(path);
+            if (Directory.Exists(target)) throw new IOException("Directory at sync file: " + path);
+            return File.Exists(target) ? FileDelivery.Measure(path, target, Cancel, Progress?.LocalHashChunk) : null;
+        }
+
+        internal ModFileState Record(DeliveryAsset asset) => new ModFileState
+        {
+            Path = asset.Path, Hash = _verified.Contains(asset.Path) ? asset.Xxh3_64 : "",
+            Owned = _ownership[asset.Path], Sha256 = _verified.Contains(asset.Path) ? asset.Sha256 : null,
+            Length = _verified.Contains(asset.Path) ? (long?)asset.Length : null
         };
 
-        internal void Apply(string staging, Action saveState)
+        internal bool RepairEligible(string path) => _verified.Contains(path);
+        internal IEnumerable<string> RecoveryPaths => _recovery.Values;
+        internal long RecoveryBytes => _recovery.Keys.Sum(path => checked(_observed[path]!.Length + 4096));
+        internal long PendingRecoveryBytes => _verifiedRecovery.Count == _recovery.Count ? 0 : RecoveryBytes;
+        internal string? RecoveryNotice => _verifiedRecovery.Count == 0 ? null : "Original plugin backups: " + string.Join("; ", _verifiedRecovery);
+        internal IEnumerable<string> Writes => _writes;
+        internal IEnumerable<string> Mutations => _writes.Concat(_deletes).Distinct(StringComparer.Ordinal);
+        internal int RemovalCount => _deletes.Count;
+        internal bool HasChanges => _writes.Count != 0 || _deletes.Count != 0;
+        internal bool NeedsRestart => _writes.Concat(_deletes).Any(path => !Bundle(path) && !Configuration(path));
+
+        private (long Length, DateTime Modified, DateTime Created)? Identity(string path)
+        {
+            var target = Resolve(path);
+            try
+            {
+                var attributes = File.GetAttributes(target);
+                if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                    throw new IOException("Not a regular sync file: " + path);
+                var info = new FileInfo(target);
+                return (info.Length, info.LastWriteTimeUtc, info.CreationTimeUtc);
+            }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
+        }
+
+        internal void Apply(Action<string, Stream> copyStaged, Action saveState) =>
+            ApplyWithPrecommit(copyStaged, saveState, () => { }, () => { }, () => { });
+
+        internal void ApplyWithPrecommit(Action<string, Stream> copyStaged, Action saveState,
+            Action requirePublication, Action requireStateAndOrigin, Action requireFinalAdmission)
+        {
+            var identities = new Dictionary<string, (long Length, DateTime Modified, DateTime Created)?>();
+            foreach (var observation in _observed)
+            {
+                var before = Identity(observation.Key);
+                var actual = Read(observation.Key);
+                var after = Identity(observation.Key);
+                if (!Nullable.Equals(before, after) || (actual == null ? observation.Value != null
+                    : observation.Value == null || !actual.Same(observation.Value)))
+                    throw new IOException("File changed during sync preflight: " + observation.Key);
+                identities.Add(observation.Key, after);
+            }
+            try
+            {
+                if (_recovery.Count != 0) requirePublication();
+                foreach (var entry in _recovery)
+                {
+                    requireStateAndOrigin();
+                    VerifyOriginal(entry.Key);
+                    CopyOriginal(entry.Key, entry.Value);
+                    VerifyOriginal(entry.Key);
+                }
+                foreach (var entry in _recovery)
+                {
+                    VerifyOriginal(entry.Key);
+                    var before = Identity(entry.Value);
+                    if (Read(entry.Value)?.Same(_observed[entry.Key]!) != true || !Nullable.Equals(before, Identity(entry.Value)))
+                        throw new IOException("Recovery copy changed: " + Resolve(entry.Value));
+                    identities.Add(entry.Value, before);
+                }
+                requirePublication();
+                requireStateAndOrigin();
+                foreach (var entry in identities)
+                    if (!Nullable.Equals(entry.Value, Identity(entry.Key)))
+                        throw new IOException("File changed during publication check: " + entry.Key);
+                requireFinalAdmission();
+                if (Progress != null) Progress.BeginApply(Cancel);
+                else Cancel.ThrowIfCancellationRequested();
+                AdvanceEpoch?.Invoke();
+                ApplyLive(copyStaged, saveState);
+            }
+            catch (Exception ex) when (RecoveryNotice != null)
+            {
+                ex.Data["ConvoyRecovery"] = RecoveryNotice;
+                throw;
+            }
+        }
+
+        private void VerifyOriginal(string path)
+        {
+            if (Read(path)?.Same(_observed[path]!) != true)
+                throw new IOException("Approved plugin original changed: " + path);
+        }
+
+        private void CopyOriginal(string path, string recovery)
+        {
+            var target = Resolve(recovery);
+            var created = false;
+            try
+            {
+                Cancel.ThrowIfCancellationRequested();
+                Directory.CreateDirectory(Resolve(RecoveryDirectory));
+                using (var source = File.OpenRead(Resolve(path)))
+                using (var output = new FileStream(Resolve(recovery), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    created = true;
+                    var remaining = _observed[path]!.Length;
+                    var buffer = new byte[64 * 1024];
+                    while (remaining != 0)
+                    {
+                        Cancel.ThrowIfCancellationRequested();
+                        var read = source.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                        if (read == 0) throw new IOException("Approved plugin shortened during backup: " + path);
+                        output.Write(buffer, 0, read);
+                        remaining -= read;
+                    }
+                    if (source.ReadByte() != -1) throw new IOException("Approved plugin grew during backup: " + path);
+                    output.Flush(true);
+                }
+                if (Read(recovery)?.Same(_observed[path]!) != true)
+                    throw new IOException("Recovery copy did not verify: " + target);
+                _verifiedRecovery.Add(path + " → " + target);
+            }
+            catch (Exception error)
+            {
+                try { if (created) File.Delete(Resolve(recovery)); }
+                catch (Exception cleanup) { throw new IOException("Backup failed at " + target + ": " + error.Message
+                    + "; could not remove incomplete copy: " + cleanup.Message, new AggregateException(error, cleanup)); }
+                if (error is OperationCanceledException) throw;
+                throw new IOException("Could not back up " + path + " to " + target + ": " + error.Message, error);
+            }
+        }
+
+        private void ApplyLive(Action<string, Stream> copyStaged, Action saveState)
         {
             var backups = new List<(string Target, string Backup)>();
             var installed = new List<string>();
+            var directories = new List<string>();
             try
             {
-                foreach (var path in _writes.Concat(_deletes).Distinct())
-                {
-                    var target = Resolve(path);
-                    if ((File.Exists(target) ? Hash(target) : null) != _observed[path])
-                        throw new IOException("File changed during sync preflight: " + path);
-                }
-                foreach (var path in _writes.Concat(_deletes).Distinct())
+                foreach (var path in Mutations)
                 {
                     var target = Resolve(path);
                     if (!File.Exists(target)) continue;
-                    var backup = target + ".convoy-old-" + Guid.NewGuid().ToString("N");
-                    File.Move(target, backup); // Allows replacing loaded plugin DLLs on Windows.
-                    backups.Add((target, backup));
+                    var backup = path + ".convoy-old-" + Guid.NewGuid().ToString("N");
+                    File.Move(target, ResolvePath(backup)); // Allows replacing loaded plugin DLLs on Windows.
+                    backups.Add((path, backup));
                 }
                 foreach (var path in _writes)
                 {
                     var target = Resolve(path);
-                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                    installed.Add(target); // Include a partially copied file in rollback.
-                    File.Copy(Path.Combine(staging, path.Replace('/', Path.DirectorySeparatorChar)), target, false);
+                    foreach (var parent in Parents(path).Reverse())
+                    {
+                        var directory = ResolvePath(parent);
+                        if (Directory.Exists(directory)) continue;
+                        Directory.CreateDirectory(directory);
+                        directories.Add(parent);
+                    }
+                    using var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    installed.Add(path); // Include a partially copied file in rollback.
+                    copyStaged(path, output);
                 }
                 saveState();
             }
@@ -155,16 +352,23 @@ namespace Convoy
             {
                 var failures = new List<Exception> { original };
                 foreach (var path in installed)
-                    try { File.Delete(path); } catch (Exception recovery) { failures.Add(recovery); }
+                    try { File.Delete(Resolve(path)); } catch (Exception recovery) { failures.Add(new IOException("Could not remove partial install " + path + ": " + recovery.Message, recovery)); }
                 foreach (var pair in backups.AsEnumerable().Reverse())
-                    try { File.Move(pair.Backup, pair.Target); }
-                    catch (Exception recovery) { failures.Add(new IOException("Could not restore " + pair.Target + "; backup retained at " + pair.Backup, recovery)); }
+                    try { File.Move(ResolvePath(pair.Backup), Resolve(pair.Target)); }
+                    catch (Exception recovery) { failures.Add(new IOException("Could not restore " + pair.Target + "; rollback backup retained at " + Path.Combine(_root, pair.Backup) + ": " + recovery.Message, recovery)); }
+                foreach (var path in directories.AsEnumerable().Reverse())
+                    try
+                    {
+                        var directory = ResolvePath(path);
+                        if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any()) Directory.Delete(directory);
+                    }
+                    catch (Exception recovery) { failures.Add(new IOException("Could not remove new directory " + path + ": " + recovery.Message, recovery)); }
                 if (failures.Count > 1) throw new AggregateException("Sync failed and rollback was incomplete", failures);
                 throw;
             }
             // Loaded assemblies may hold these until process exit. Do not recursively sweep
             // arbitrary game files as a cleanup mechanism; retained backups are never owned.
-            foreach (var pair in backups) try { File.Delete(pair.Backup); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            foreach (var pair in backups) try { File.Delete(ResolvePath(pair.Backup)); } catch (IOException) { } catch (UnauthorizedAccessException) { } catch (InvalidOperationException) { }
         }
     }
 }

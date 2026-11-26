@@ -7,7 +7,6 @@
     <ItemGroup>
         <Reference Include="Convoy" HintPath="$(ConvoyBuildDir)/Convoy.dll" Private="false" />
         <Reference Include="BepInEx" HintPath="$(ConvoyBuildDir)/BepInEx.dll" Private="false" />
-        <Reference Include="System.IO.Compression" />
         <Reference Include="Newtonsoft.Json" HintPath="$(ConvoyBuildDir)/Newtonsoft.Json.dll" Private="false" />
         <Reference Include="System.Memory" HintPath="$(ConvoyBuildDir)/System.Memory.dll" Private="false" />
         <Reference Include="System.IO.Hashing" HintPath="$(ConvoyBuildDir)/System.IO.Hashing.dll" Private="false" />
