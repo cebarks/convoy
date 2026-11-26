@@ -10,7 +10,7 @@ namespace Convoy
     [BepInPlugin("io.cebarks.convoy", "Convoy", VersionInfo.Version)]
     public class ConvoyPlugin : BaseUnityPlugin
     {
-        private enum PluginState { Idle, Planning, AwaitingConfirmation, Executing, RestartRequired, Complete }
+        private enum PluginState { Idle, Planning, AwaitingConfirmation, Executing, RestartRequired, Complete, Retry }
 
         private ConvoyConfig? _config;
         private SyncEngine? _engine;
@@ -25,8 +25,11 @@ namespace Convoy
         // Confirmation UI state
         private SyncPlan? _plan;
         private Dictionary<string, bool> _groupCollapsed = new Dictionary<string, bool>();
-        private Dictionary<int, bool> _modChecked = new Dictionary<int, bool>();
+        private Dictionary<long, bool> _modChecked = new Dictionary<long, bool>();
         private Vector2 _scrollPosition;
+        private readonly HashSet<ReplacementConsent> _replacementChecked = new HashSet<ReplacementConsent>();
+        private string? _replacementNotice;
+        private const float ReplacementRowHeight = 56f;
 
         // Execution phase
         private SyncProgress? _execProgress;
@@ -67,20 +70,11 @@ namespace Convoy
             );
             _panel.UpdateState(ConvoyState.Load());
 
-            // Run plan synchronously to block game init until catalog check completes
-            try
-            {
-                var plan = _engine.PlanSync();
-                HandlePlanResult(plan, null);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"Convoy plan failed: {ex.Message}");
-                Logger.LogDebug(ex);
-                _engine.SendReport("failed", null, ex.Message);
-                HandlePlanResult(null, ex.Message);
-            }
+            StartPlanning();
         }
+
+        private Action? _retry;
+        private string? _retryMessage;
 
         private void HandlePlanResult(SyncPlan? plan, string? error)
         {
@@ -95,7 +89,8 @@ namespace Convoy
                 }
                 _panel?.UpdateOutcome(outcome);
                 ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
-                _state = PluginState.Complete;
+                _retryMessage = error;
+                _state = PluginState.Retry;
             }
             else if (plan == null ||
                      (plan.Installs.Count == 0 && plan.Updates.Count == 0 && plan.Removals.Count == 0))
@@ -123,8 +118,16 @@ namespace Convoy
             }
         }
 
+        private bool FlushSelection()
+        {
+            try { _panel?.FlushIfDirty(_engine!); return true; }
+            catch (Exception ex) { _retryMessage = ex.Message; _state = PluginState.Retry; return false; }
+        }
+
         private void StartPlanning()
         {
+            _retry = StartPlanning;
+            if (!FlushSelection()) return;
             var engine = _engine!;
             var progress = new SyncProgress();
             _planProgress = progress;
@@ -140,6 +143,7 @@ namespace Convoy
                 }
                 catch (Exception ex)
                 {
+                    if (progress.CancellationRequested) { progress.Complete(SyncResult.Cancelled, "Sync cancelled"); return; }
                     Logger.LogError($"Convoy plan failed: {ex.Message}");
                     Logger.LogDebug(ex);
                     engine.SendReport("failed", null, ex.Message);
@@ -158,16 +162,20 @@ namespace Convoy
         {
             // Suppress keybind while a modal overlay is showing
             if (_state != PluginState.AwaitingConfirmation && _state != PluginState.RestartRequired
-                && _state != PluginState.Planning && _state != PluginState.Executing)
+                && _state != PluginState.Planning && _state != PluginState.Executing && _state != PluginState.Retry)
                 _panel?.HandleKeybind();
-            _panel?.FlushIfDirty();
+            if (_state == PluginState.Idle || _state == PluginState.Complete)
+            {
+                try { _panel?.FlushAutomaticSelection(_engine!); }
+                catch (Exception ex) { ShowStatus("Convoy: could not save selection — " + ex.Message, Color.red, 5f); }
+            }
 
             switch (_state)
             {
                 case PluginState.Planning:
                     if (_planProgress != null && _planProgress.IsComplete)
                     {
-                        var error = _planProgress.Result == SyncResult.Failed ? _planProgress.Error : null;
+                        var error = _planProgress.Error;
                         HandlePlanResult(_pendingPlan, error);
                         _planThread = null;
                         _planProgress = null;
@@ -181,6 +189,7 @@ namespace Convoy
                         var outcome = new SyncOutcome
                         {
                             Result = _execProgress.Result ?? SyncResult.UpToDate,
+                            Recovery = _execProgress.Snapshot().Recovery,
                             Error = _execProgress.Error
                         };
                         if (_plan != null)
@@ -189,8 +198,9 @@ namespace Convoy
                             outcome.QuartermasterVersion = _plan.Catalog.QuartermasterVersion;
                             outcome.ServerUrl = _plan.ServerUrl;
                         }
+                        _replacementNotice = outcome.Recovery;
                         _panel?.UpdateOutcome(outcome);
-                        _panel?.UpdateState(ConvoyState.Load());
+                        _panel?.RefreshState(ConvoyState.Load(), preserveDraft: _repairMode == true);
 
                         _execThread = null;
                         _execProgress = null;
@@ -198,12 +208,21 @@ namespace Convoy
 
                         switch (outcome.Result)
                         {
+                            case SyncResult.Replan:
+                                if (OpenFreshChooserAfterReplan(_repairMode)) StartPlanning();
+                                else goto case SyncResult.Failed;
+                                break;
+                            case SyncResult.Cancelled:
                             case SyncResult.Failed:
-                                ShowStatus("Convoy: sync failed — check BepInEx log", Color.red, 15f);
-                                _state = PluginState.Complete;
+                                _retryMessage = outcome.Error ?? (outcome.Result == SyncResult.Cancelled ? "Sync cancelled" : "Convoy sync failed");
+                                _state = PluginState.Retry;
                                 break;
                             case SyncResult.RestartRequired:
                                 _state = PluginState.RestartRequired;
+                                break;
+                            case SyncResult.Applied:
+                                ShowStatus("Convoy: mods updated", Color.green, 5f);
+                                _state = PluginState.Complete;
                                 break;
                             default:
                                 ShowStatus("Convoy: mods up to date", Color.green, 5f);
@@ -220,6 +239,7 @@ namespace Convoy
         {
             _groupCollapsed.Clear();
             _modChecked.Clear();
+            _replacementChecked.Clear();
             _scrollPosition = Vector2.zero;
 
             var slugs = plan.Installs.Concat(plan.Updates)
@@ -236,7 +256,7 @@ namespace Convoy
         private void OnConfirm()
         {
             var plan = _plan!;
-            var confirmedModIds = new List<int>();
+            var confirmedModIds = new List<long>();
 
             confirmedModIds.AddRange(plan.Installs.Where(m => m.IsRequired).Select(m => m.Id));
             confirmedModIds.AddRange(plan.Updates.Where(m => m.IsRequired).Select(m => m.Id));
@@ -247,14 +267,16 @@ namespace Convoy
                     confirmedModIds.Add(kvp.Key);
             }
 
-            var skippedModIds = new HashSet<int>(plan.State.SkippedMods);
+            var skippedModIds = new HashSet<long>(plan.State.SkippedMods);
             foreach (var kvp in _modChecked)
             {
                 if (!kvp.Value)
                     skippedModIds.Add(kvp.Key);
             }
 
-            StartExecution(confirmedModIds, skippedModIds);
+            var replacements = plan.Replacements.Where(r => confirmedModIds.Contains(r.ModId)).ToArray();
+            if (replacements.Any(r => !_replacementChecked.Contains(r))) return;
+            StartExecution(confirmedModIds, skippedModIds, replacements);
         }
 
         private void OnSkipSync()
@@ -265,10 +287,12 @@ namespace Convoy
             _state = PluginState.Complete;
         }
 
-        private void StartExecution(List<int> confirmedModIds, HashSet<int> skippedModIds)
+        private void StartExecution(List<long> confirmedModIds, HashSet<long> skippedModIds, IReadOnlyList<ReplacementConsent> replacements)
         {
+            _repairMode = null;
             var engine = _engine!;
             var plan = _plan!;
+            _retry = StartPlanning;
             var progress = new SyncProgress();
             _execProgress = progress;
 
@@ -276,7 +300,7 @@ namespace Convoy
             {
                 try
                 {
-                    var result = engine.ExecuteSync(plan, confirmedModIds, skippedModIds, progress);
+                    var result = engine.ExecuteSync(plan, confirmedModIds, skippedModIds, replacements, progress);
                     progress.Complete(result);
                 }
                 catch (Exception ex)
@@ -295,8 +319,15 @@ namespace Convoy
             _state = PluginState.Executing;
         }
 
+        private bool? _repairMode;
+        internal static bool OpenFreshChooserAfterReplan(bool? repairMode) => !repairMode.HasValue;
+
         private void StartRedownload(bool bundlesOnly)
         {
+            _repairMode = bundlesOnly;
+            _retry = () => StartRedownload(bundlesOnly);
+            if (bundlesOnly) _panel?.DeferDraftFlush();
+            else if (!FlushSelection()) return;
             var engine = _engine!;
             var progress = new SyncProgress();
             _execProgress = progress;
@@ -306,12 +337,12 @@ namespace Convoy
                 try
                 {
                     progress.SetPhase("Fetching catalog...");
-                    var catalog = engine.FetchCatalogPublic();
-                    var result = engine.ExecuteRedownload(catalog, bundlesOnly, progress);
+                    var result = engine.ExecuteFreshRepair(bundlesOnly, progress);
                     progress.Complete(result);
                 }
                 catch (Exception ex)
                 {
+                    if (progress.CancellationRequested) { progress.Complete(SyncResult.Cancelled, "Sync cancelled"); return; }
                     Logger.LogError($"Convoy redownload failed: {ex.Message}");
                     Logger.LogDebug(ex);
                     engine.SendReport("failed", null, ex.Message);
@@ -381,7 +412,7 @@ namespace Convoy
             if (_state == PluginState.RestartRequired ||
                 _state == PluginState.AwaitingConfirmation ||
                 _state == PluginState.Planning ||
-                _state == PluginState.Executing)
+                _state == PluginState.Executing || _state == PluginState.Retry)
             {
                 EnsureStyles();
                 GUI.ModalWindow(ModalId, new Rect(0, 0, Screen.width, Screen.height),
@@ -430,6 +461,7 @@ namespace Convoy
             {
                 case PluginState.Planning:
                 case PluginState.Executing:
+                case PluginState.Retry:
                     DrawSyncProgress();
                     break;
                 case PluginState.AwaitingConfirmation:
@@ -444,7 +476,7 @@ namespace Convoy
         private void DrawSyncProgress()
         {
             const float popupWidth = 400f;
-            const float popupHeight = 120f;
+            const float popupHeight = 156f;
             float popupX = (Screen.width - popupWidth) / 2f;
             float popupY = (Screen.height - popupHeight) / 2f;
 
@@ -460,9 +492,16 @@ namespace Convoy
             };
 
             var progress = _state == PluginState.Planning ? _planProgress : _execProgress;
-            var progressText = progress != null ? FormatProgress(progress) : "Syncing...";
+            var progressText = _state == PluginState.Retry ? _retryMessage : progress != null ? FormatProgress(progress) : "Syncing...";
             GUI.Label(new Rect(popupX + Padding, popupY + 50f, popupWidth - Padding * 2, 50f),
                 progressText, msgStyle);
+            if (_state == PluginState.Retry)
+            {
+                if (GUI.Button(new Rect(popupX + 90f, popupY + 108f, 100f, 32f), "Retry")) _retry?.Invoke();
+                if (GUI.Button(new Rect(popupX + 210f, popupY + 108f, 100f, 32f), "Close")) _state = PluginState.Complete;
+            }
+            else if (progress?.Snapshot().CanCancel == true && GUI.Button(new Rect(popupX + 150f, popupY + 108f, 100f, 32f), "Cancel"))
+                progress.TryCancel();
         }
 
         private void DrawConfirmation()
@@ -560,6 +599,21 @@ namespace Convoy
                 }
             }
 
+            foreach (var replacement in plan.Replacements)
+            {
+                var active = ReplacementSelected(replacement);
+                var guiEnabled = GUI.enabled;
+                GUI.enabled = guiEnabled && active;
+                var checkedBefore = _replacementChecked.Contains(replacement);
+                var approved = GUI.Toggle(new Rect(0, y, innerWidth, LineHeight), checkedBefore,
+                    $"Back up and replace (mod {replacement.ModId})");
+                GUI.enabled = guiEnabled;
+                if (approved && active) _replacementChecked.Add(replacement);
+                else _replacementChecked.Remove(replacement);
+                var label = new GUIStyle(GUI.skin.label) { wordWrap = true };
+                GUI.Label(new Rect(IndentWidth, y + LineHeight, innerWidth - IndentWidth, ReplacementRowHeight - LineHeight), replacement.Path, label);
+                y += ReplacementRowHeight;
+            }
             GUI.EndScrollView();
 
             float buttonY = panelY + panelHeight - buttonHeight;
@@ -568,8 +622,11 @@ namespace Convoy
             float buttonsWidth = buttonWidth * 2 + buttonSpacing;
             float buttonStartX = panelX + (PanelWidth - buttonsWidth) / 2f;
 
+            var confirmEnabled = GUI.enabled;
+            GUI.enabled = confirmEnabled && !plan.Replacements.Any(r => ReplacementSelected(r) && !_replacementChecked.Contains(r));
             if (GUI.Button(new Rect(buttonStartX, buttonY, buttonWidth, 32f), "Confirm"))
                 OnConfirm();
+            GUI.enabled = confirmEnabled;
 
             if (GUI.Button(new Rect(buttonStartX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 32f), "Skip Sync"))
                 OnSkipSync();
@@ -578,7 +635,7 @@ namespace Convoy
         private void DrawRestart()
         {
             const float popupWidth = 400f;
-            const float popupHeight = 160f;
+            float popupHeight = _replacementNotice == null ? 160f : 200f;
             float popupX = (Screen.width - popupWidth) / 2f;
             float popupY = (Screen.height - popupHeight) / 2f;
 
@@ -597,6 +654,9 @@ namespace Convoy
             GUI.Label(new Rect(popupX + Padding, popupY + 50f, popupWidth - Padding * 2, 50f),
                 "Mods have been updated. Restart the game for changes to take effect.", msgStyle);
 
+            if (_replacementNotice != null && GUI.Button(new Rect(popupX + Padding, popupY + 100f, popupWidth - 2 * Padding, 30f), "Copy original plugin backup paths"))
+                GUIUtility.systemCopyBuffer = _replacementNotice;
+
             const float btnWidth = 130f;
             const float btnSpacing = 20f;
             float btnY = popupY + popupHeight - 44f;
@@ -611,6 +671,9 @@ namespace Convoy
                 _state = PluginState.Complete;
             }
         }
+
+        private bool ReplacementSelected(ReplacementConsent replacement) => _plan!.Updates.Any(m => m.Id == replacement.ModId && m.IsRequired)
+            || (_modChecked.TryGetValue(replacement.ModId, out var selected) && selected);
 
         private float CalculateContentHeight(SyncPlan plan)
         {
@@ -630,21 +693,18 @@ namespace Convoy
                 if (!(_groupCollapsed.ContainsKey("__removals") && _groupCollapsed["__removals"]))
                     height += plan.Removals.Count * LineHeight;
             }
-            return height;
+            return height + plan.Replacements.Count * ReplacementRowHeight;
         }
 
         #endregion
 
         private static string FormatProgress(SyncProgress progress)
         {
-            var phase = progress.Phase;
-            var total = progress.TotalBytes;
-            var received = progress.BytesReceived;
-
-            if (total > 0)
-                return $"Convoy: {phase} {FormatBytes(received)} / {FormatBytes(total)}";
-
-            return $"Convoy: {phase}";
+            var view = progress.Snapshot();
+            if (view.Planned > 0)
+                return $"{view.Phase}: {FormatBytes(view.Received + view.Reused)} / {FormatBytes(view.Planned)}"
+                    + $" ({FormatBytes(view.Reused)} reused, {FormatBytes(view.BytesPerSecond)}/s)";
+            return view.Expected > 0 ? $"{view.Phase}: {view.Scanned}/{view.Expected}" : view.Phase;
         }
 
         private static string FormatBytes(long bytes)
