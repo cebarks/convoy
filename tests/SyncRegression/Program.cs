@@ -45,7 +45,7 @@ internal static class Program
             ("v2 resumes only unfinished object", g => g.Resume()),
             ("v2 second process does not acquire root", g => g.Exclusive()),
             ("v2 staging cap", g => g.Cap()),
-            ("eight object HTTP bodies overlap without changing the default pool", g => g.ConcurrentObjects()),
+            ("sixteen object HTTP bodies overlap without changing the default pool", g => g.ConcurrentObjects()),
             ("v2 cancelled final GET preserves live files and state", g => g.Cancel(false)),
             ("v2 cancelled bookkeeping preserves state", g => g.Cancel(true)),
             ("v2 stale generation requests replan", g => g.StaleGeneration()),
@@ -744,7 +744,8 @@ internal static class Program
         public void ConcurrentLocalReads(bool precommit, bool cancel = false)
         {
             Fresh();
-            var mod = AssetBatch("local", 5);
+            var readers = Math.Max(1, Environment.ProcessorCount - 2);
+            var mod = AssetBatch("local", readers + 1);
             foreach (var asset in mod.Assets) Write(asset.Path, asset.Bytes);
             var shared = new ManifestMod { Id = Id + 1, Assets = { mod.Assets[0] } };
             _server.Publish(mod, shared);
@@ -752,7 +753,7 @@ internal static class Program
             var progress = new SyncProgress();
             var phase = precommit ? "Verifying" : "Checking installed files";
             var seen = new ConcurrentQueue<string>();
-            var slots = cancel ? 2 : 4;
+            var slots = cancel ? Math.Min(2, readers) : readers;
             using var wave = new HeldWave(slots);
             SetObserver(progress, "LocalHashChunk", (Action<string>)(path =>
             {
@@ -787,7 +788,8 @@ internal static class Program
                 Check(work.Result == SyncResult.UpToDate, "parallel observation failed: " + progress.Error);
                 Check(seen.OrderBy(path => path).SequenceEqual(mod.Assets.Select(asset => asset.Path).OrderBy(path => path)),
                     "matching shared path was read more than once in the phase, or another path was missed");
-                Check(progress.Snapshot().Scanned == 5 && progress.Snapshot().Expected == 5, "wrong installed-file progress");
+                Check(progress.Snapshot().Scanned == mod.Assets.Count && progress.Snapshot().Expected == mod.Assets.Count,
+                    "wrong installed-file progress");
             }
             _server.ExpectObjects();
             var installed = ConvoyState.Load().Mods;
@@ -797,7 +799,7 @@ internal static class Program
 
         public void ConcurrentObjects()
         {
-            var mod = AssetBatch("http", 9);
+            var mod = AssetBatch("http", 17);
             _server.Publish(mod);
             var request = WebRequest.CreateHttp(new Uri(_server.Url));
             request.Proxy = null;
@@ -807,7 +809,7 @@ internal static class Program
             bool SharedLimitsUnchanged() => servicePoint.ConnectionLimit == originLimit && ServicePointManager.DefaultConnectionLimit == defaultLimit;
             var plan = Plan();
             var progress = new SyncProgress();
-            using var wave = new HeldWave(8);
+            using var wave = new HeldWave(16);
             _server.Fault = "blocked-bodies";
             _server.BodyPrefix = wave.Hold;
             var work = Task.Run(() => Execute(plan, progress));
@@ -817,7 +819,7 @@ internal static class Program
                 Unchanged();
                 Check(mod.Assets.All(a => ReadIfPresent(a.Path) == null) && _server.CatalogRequests == 1,
                     "live files or publication changed before the object bodies finished");
-                Check(wave.Entered == 8 && _server.ObjectRequestCount == 8, "a ninth object request entered before a slot freed");
+                Check(wave.Entered == 16 && _server.ObjectRequestCount == 16, "a seventeenth object request entered before a slot freed");
                 Check(SharedLimitsUnchanged(), "Convoy changed a shared HTTP connection limit during download");
             }
             finally { wave.Release(); Check(work.Wait(15_000), "object workers did not join"); }

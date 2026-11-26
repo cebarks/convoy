@@ -20,7 +20,7 @@ namespace Convoy
         private readonly Dictionary<string, string> _recovery = new Dictionary<string, string>(StringComparer.Ordinal);
         private readonly List<string> _verifiedRecovery = new List<string>();
         private const string RecoveryDirectory = "BepInEx/config/Convoy/recovery";
-        private const int LocalReadWorkers = 4;
+        private static readonly int LocalReadWorkers = Math.Max(1, Environment.ProcessorCount - 2);
         private readonly List<string> _deletes = new List<string>();
 
         internal static bool Allowed(string path)
