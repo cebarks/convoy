@@ -137,6 +137,7 @@ internal static class Program
             ("unowned BepInEx conflict", g => g.Conflict(First)),
             ("configuration preservation", g => g.PreserveConfiguration()),
             ("unsupported roots/path aliases rejected", g => g.RejectPaths()),
+            ("linked game ancestor permits sync", g => g.LinkedGameAncestor()),
             ("reparse escape rejected", g => g.RejectLink()),
             ("same-version manifest update is planned", g => g.SameVersionUpdate()),
             ("task5 approved replacement remains unowned", g => g.Recover("approved")),
@@ -1304,6 +1305,40 @@ internal static class Program
                 Check(ReadState() == OriginalState && ReadIfPresent(Old) == "installed old file", "unsafe path mutated game: " + path);
                 _server.ExpectObjects();
             }
+        }
+
+        public void LinkedGameAncestor()
+        {
+            var physical = Path.Combine(_root, "physical");
+            var actualGame = Path.Combine(physical, "game");
+            var alias = Path.Combine(_root, "alias");
+            Directory.CreateDirectory(actualGame);
+            using var process = Process.Start(new ProcessStartInfo("ln", "-s \"" + physical + "\" \"" + alias + "\"") { UseShellExecute = false });
+            process!.WaitForExit();
+            Check(process.ExitCode == 0, "ancestor link fixture failed");
+            try
+            {
+                var game = Path.Combine(alias, "game");
+                Check((new DirectoryInfo(alias).Attributes & FileAttributes.ReparsePoint) != 0, "fixture ancestor is not linked");
+                SetBepInExPath(nameof(Paths.GameRootPath), game);
+                SetBepInExPath(nameof(Paths.ConfigPath), Path.Combine(game, "BepInEx", "config"));
+                SetBepInExPath(nameof(Paths.BepInExConfigPath), Path.Combine(game, "BepInEx", "config", "BepInEx.cfg"));
+                var engine = new SyncEngine(new ManualLogSource("Linked ancestor regression"),
+                    new ConvoyConfig(new BepInEx.Configuration.ConfigFile(Path.Combine(game, "BepInEx/config/test.cfg"), false)));
+                _server.Publish(Required());
+                var plan = engine.PlanSync()!;
+                Check(engine.ExecuteSync(plan, new List<long> { Id }, new HashSet<long>(), Array.Empty<ReplacementConsent>()) == SyncResult.RestartRequired,
+                    "sync through linked ancestor failed");
+                Check(File.ReadAllText(Path.Combine(actualGame, First)) == "abc", "linked ancestor sync installed wrong bytes");
+                Check(ConvoyState.Load().Mods.Single().Files.Single().Path == First, "linked ancestor sync did not save state");
+                _server.ExpectObjects(Abc);
+                _server.ClearRequests();
+                plan = engine.PlanSync()!;
+                Check(engine.ExecuteSync(plan, new List<long>(), new HashSet<long>(), Array.Empty<ReplacementConsent>()) == SyncResult.UpToDate,
+                    "linked ancestor follow-up was not a no-op");
+                _server.ExpectObjects();
+            }
+            finally { Directory.Delete(alias); }
         }
 
         public void RejectLink()
