@@ -5,6 +5,7 @@
 ### Changed
 
 - Check and re-verify installed files with up to four parallel readers and download up to eight distinct objects at a time. Verified installation and rollback remain serial.
+- Prepare install files while verifying each object, then publish the verified files without copying or hashing them during Apply. Installations that cannot protect prepared files keep verification during the copy.
 
 ### Breaking
 

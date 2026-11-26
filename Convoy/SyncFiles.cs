@@ -270,7 +270,7 @@ namespace Convoy
             ApplyWithPrecommit(copyStaged, saveState, () => { }, () => { }, () => { });
 
         internal void ApplyWithPrecommit(Action<string, Stream> copyStaged, Action saveState,
-            Action requirePublication, Action requireStateAndOrigin, Action requireFinalAdmission)
+            Action requirePublication, Action requireStateAndOrigin, Action requireFinalAdmission, Action<string, string>? placePrepared = null)
         {
             var originals = _observed.ToArray();
             var rechecked = ReadBatch(originals.Length, i =>
@@ -317,7 +317,7 @@ namespace Convoy
                 if (Progress != null) Progress.BeginApply(Cancel);
                 else Cancel.ThrowIfCancellationRequested();
                 AdvanceEpoch?.Invoke();
-                ApplyLive(copyStaged, saveState);
+                ApplyLive(copyStaged, saveState, placePrepared);
             }
             catch (Exception ex) when (RecoveryNotice != null)
             {
@@ -371,7 +371,7 @@ namespace Convoy
             }
         }
 
-        private void ApplyLive(Action<string, Stream> copyStaged, Action saveState)
+        private void ApplyLive(Action<string, Stream> copyStaged, Action saveState, Action<string, string>? placePrepared)
         {
             var backups = new List<(string Target, string Backup)>();
             var installed = new List<string>();
@@ -395,6 +395,12 @@ namespace Convoy
                         if (Directory.Exists(directory)) continue;
                         Directory.CreateDirectory(directory);
                         directories.Add(parent);
+                    }
+                    if (placePrepared != null)
+                    {
+                        placePrepared(path, target);
+                        installed.Add(path);
+                        continue;
                     }
                     using var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                     installed.Add(path); // Include a partially copied file in rollback.

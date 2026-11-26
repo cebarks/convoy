@@ -168,8 +168,11 @@ internal static class Program
         tests.Add(("r1 task5 pinned origin", g => g.SwappedPlan(true)));
         tests.Add(("r1 task5 appeared config preserved", g => g.Appeared(true)));
         tests.Add(("r1 task5 appeared DLL rejected", g => g.Appeared(false)));
-        tests.Add(("Wave staged truncation rolls back", g => g.StagedDrift("sh")));
-        tests.Add(("Wave staged same-length drift rolls back", g => g.StagedDrift("bad bytes")));
+        tests.Add(("v2 prepared install does not reopen the transfer cache", g => g.PreparedInstall(true)));
+        if (File.Exists("/proc/self/io"))
+            tests.Add(("v2 prepared install does not bulk-write during apply", g => g.PreparedInstall(false)));
+        tests.Add(("v2 staged truncation cannot change installed bytes", g => g.StagedDrift("sh")));
+        tests.Add(("v2 staged same-length drift cannot change installed bytes", g => g.StagedDrift("bad bytes")));
         tests.Add(("Wave republish during recovery replan", g => g.PostHashAdmission(true)));
         tests.Add(("Wave capacity drop during recovery", g => g.PostHashAdmission(false)));
         tests.Add(("r1 task5 bundle panel dispatch preserves dirty delta", g => g.DirtyBundleDispatch()));
@@ -1619,6 +1622,46 @@ internal static class Program
             _server.ExpectObjects();
         }
 
+        private static long ProcessBytesWritten() => long.Parse(File.ReadLines("/proc/self/io")
+            .First(line => line.StartsWith("wchar:", StringComparison.Ordinal)).Substring(6));
+
+        public void PreparedInstall(bool removeCache)
+        {
+            Fresh();
+            _server.Publish(Required());
+            var initial = new SyncProgress();
+            Check(Execute(Plan(), initial) == SyncResult.RestartRequired, "owned fixture install failed: " + initial.Error);
+            var before = ReadState();
+            var body = new string('a', 256 * 1024);
+            var digest = Sha(body);
+            _server.Publish(new ManifestMod { Id = Id, Version = "prepared" }.Add(First, body).Add(Second, body));
+            long atFence = -1, afterPlacement = -1;
+            var reachedFence = false;
+            _server.Conditional = () =>
+            {
+                var cache = Directory.GetFiles(Path.GetDirectoryName(StateFile)!, "*-" + digest + "-*.data", SearchOption.AllDirectories).Single();
+                Check(new FileInfo(cache).Length == body.Length && ReadIfPresent(First) == "abc" && ReadIfPresent(Second) == null,
+                    "fixture did not reach the final fence with complete staged bytes and intact live files");
+                if (removeCache) File.Delete(cache);
+                else atFence = ProcessBytesWritten();
+                reachedFence = true;
+            };
+            var progress = new SyncProgress();
+            if (!removeCache)
+                SetObserver(progress, "BeforeStateSave", (Action)(() => afterPlacement = ProcessBytesWritten()));
+            var result = Execute(Plan(), progress);
+            Check(reachedFence && result == SyncResult.RestartRequired, "prepared placement failed: " + progress.Error);
+            Check(ReadIfPresent(First) == body && ReadIfPresent(Second) == body && ReadState() != before,
+                "prepared placement did not install both files and commit state");
+            if (!removeCache)
+            {
+                Check(atFence >= 0 && afterPlacement >= atFence && afterPlacement - atFence < body.Length,
+                    "apply rewrote payload bytes after the final fence: " + (afterPlacement - atFence));
+                Console.WriteLine($"Apply interval: {afterPlacement - atFence} process bytes written for two {body.Length}-byte files");
+            }
+            _server.ExpectObjects(digest);
+        }
+
         public void StagedDrift(string drift)
         {
             Fresh();
@@ -1637,10 +1680,21 @@ internal static class Program
             };
             var progress = new SyncProgress();
             var result = Execute(Plan(), progress);
-            Check(changed && result == SyncResult.Failed && progress.Error!.Contains("staged object"), "staged drift reached state commit");
-            Check(ReadState() == state && ReadIfPresent(First) == "abc" && ReadIfPresent(added) == null
-                && !Directory.Exists(Path.GetDirectoryName(Path.Combine(_root, added)))
-                && !Directory.EnumerateFiles(_root, "*.convoy-old-*", SearchOption.AllDirectories).Any(), "staged drift did not roll back live files/state");
+            Check(changed, "fixture did not change the cache after staging");
+            if (result == SyncResult.RestartRequired)
+            {
+                Check(ReadState() != state && ReadIfPresent(First) == "new bytes" && ReadIfPresent(added) == "extra bytes",
+                    "prepared placement installed changed cache bytes or did not commit");
+                Console.WriteLine("Late cache change did not affect prepared files");
+            }
+            else
+            {
+                Check(result == SyncResult.Failed && progress.Error!.Contains("staged object"), "verified-copy fallback did not reject cache drift");
+                Check(ReadState() == state && ReadIfPresent(First) == "abc" && ReadIfPresent(added) == null
+                    && !Directory.Exists(Path.GetDirectoryName(Path.Combine(_root, added))), "fallback did not roll back live files/state");
+                Console.WriteLine("Verified-copy fallback rejected late cache change");
+            }
+            Check(!Directory.EnumerateFiles(_root, "*.convoy-old-*", SearchOption.AllDirectories).Any(), "staged drift left a rollback backup");
             Check(File.ReadAllText(Directory.GetFiles(Path.GetDirectoryName(StateFile)!, "*-" + Sha("extra bytes") + "-11.data", SearchOption.AllDirectories).Single()) == "extra bytes", "valid staged object was lost");
         }
 

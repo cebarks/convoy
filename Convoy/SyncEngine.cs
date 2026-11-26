@@ -421,11 +421,13 @@ namespace Convoy
         {
             var writes = files.Writes.Select(path => incoming[path]).ToArray();
             var unique = (force ? incoming.Values.Where(a => files.RepairEligible(a.Path)) : writes).GroupBy(a => a.Sha256).Select(g => g.First()).ToArray();
-            var applyBytes = checked(writes.Sum(a => checked(a.Length + 4096)) + stateBytes + files.RemovalCount * 4096L + 64 * 1024L); // Existing rollback files are renamed, not copied.
+            var metadataBytes = checked(stateBytes + (writes.LongLength + files.RemovalCount) * 4096 + 64 * 1024L);
+            var applyBytes = checked(writes.Sum(a => a.Length) + metadataBytes); // Existing rollback files are renamed, not copied.
             void CheckVolumes() => spool.CheckVolumes(files.Mutations.Concat(files.RecoveryPaths).Select(files.Resolve).Append(snapshot.Target), VolumeIdentity);
             CheckVolumes();
             if (force) foreach (var asset in unique) FileDelivery.PrepareForcedRetrieval(asset, spool);
             spool.Reserve(unique, checked(applyBytes + files.RecoveryBytes));
+            using var prepared = spool.PrepareInstall(writes, cancel);
             progress?.Plan(unique.Sum(a => a.Length));
             var manifestBudget = _delivery.NewManifestBudget();
             var failures = new ConcurrentQueue<Exception>();
@@ -439,7 +441,7 @@ namespace Convoy
                 {
                     if (i >= unique.Length) return;
                     var asset = unique[i];
-                    try { _delivery.Stage(origin, catalog.Generation, asset, spool, progress, cancel, manifestBudget, connectionGroup); }
+                    try { _delivery.Stage(origin, catalog.Generation, asset, spool, progress, cancel, manifestBudget, connectionGroup, prepared); }
                     catch (Exception ex) { failures.Enqueue(ex); return; }
                     if (!failures.IsEmpty) return;
                 }
@@ -453,12 +455,12 @@ namespace Convoy
             {
                 cancel.ThrowIfCancellationRequested();
                 CheckVolumes();
-                spool.RequireFree(checked(applyBytes + files.PendingRecoveryBytes), AvailableSpace);
+                spool.RequireFree(checked((prepared != null ? metadataBytes : applyBytes) + files.PendingRecoveryBytes), AvailableSpace);
             }
             CheckApplyAdmission();
             files.ApplyWithPrecommit((path, output) => spool.CopyVerified(incoming[path], output), saveState,
                 () => RequireCurrent(origin, catalog, progress, cancel, manifestBudget),
-                () => RequireStateAndOrigin(files, snapshot, origin), CheckApplyAdmission);
+                () => RequireStateAndOrigin(files, snapshot, origin), CheckApplyAdmission, prepared == null ? null : prepared.Place);
             if (files.RecoveryNotice is string recovery)
             {
                 _log.LogInfo(recovery);

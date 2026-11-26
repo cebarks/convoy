@@ -6,7 +6,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
+using System.Threading;
 
 namespace Convoy
 {
@@ -107,13 +107,14 @@ namespace Convoy
             [FieldOffset(40)] public uint Links;
         }
         [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out WindowsFileInfo info);
+        private static extern bool GetFileInformationByHandle(SafeHandle handle, out WindowsFileInfo info);
         [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern uint GetFileType(SafeFileHandle handle);
+        private static extern uint GetFileType(SafeHandle handle);
 
-        private static void RequirePrivateFile(FileStream stream)
+        private static void RequirePrivateFile(FileStream stream) => RequirePrivateFile(stream.SafeFileHandle);
+
+        internal static void RequirePrivateFile(SafeHandle handle, bool anonymous = false)
         {
-            var handle = stream.SafeFileHandle;
             bool safe;
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 safe = GetFileType(handle) == 1 && GetFileInformationByHandle(handle, out var info)
@@ -123,11 +124,12 @@ namespace Convoy
                 // AT_EMPTY_PATH reads the very descriptor that will be mutated.
                 const uint fields = 0x5; // STATX_TYPE | STATX_NLINK
                 safe = statx(handle.DangerousGetHandle().ToInt32(), "", 0x1000, fields, out var info) == 0
-                    && (info.Mask & fields) == fields && (info.Mode & 0xf000) == 0x8000 && info.Links == 1;
+                    && (info.Mask & fields) == fields && (info.Mode & 0xf000) == 0x8000 && info.Links == (anonymous ? 0 : 1);
                 GC.KeepAlive(handle);
             }
             else throw new PlatformNotSupportedException("Convoy spool requires Windows or Linux file identity checks");
-            if (!safe) throw new IOException("Convoy mutable spool entry is not a singly linked regular file");
+            if (!safe) throw new IOException(anonymous ? "Convoy prepared file no longer has private anonymous storage"
+                : "Convoy mutable spool entry is not a singly linked regular file");
         }
 
         internal FileStream OpenDataForWrite(DeliveryAsset asset, bool append, long length)
@@ -168,10 +170,19 @@ namespace Convoy
 
         internal string DataPath(DeliveryAsset asset) => PathFor(asset, ".data");
 
+        internal FileStream OpenDataForRead(DeliveryAsset asset)
+        {
+            var stream = new FileStream(DataPath(asset), FileMode.Open, FileAccess.Read, FileShare.Read);
+            try { RequirePrivateFile(stream); return stream; }
+            catch { stream.Dispose(); throw; }
+        }
+
+        internal PreparedInstall? PrepareInstall(DeliveryAsset[] writes, CancellationToken cancel) =>
+            PreparedInstall.TryCreate(_paths.Resolve(Root), writes, cancel);
+
         internal void CopyVerified(DeliveryAsset asset, Stream output)
         {
-            using var source = new FileStream(DataPath(asset), FileMode.Open, FileAccess.Read, FileShare.Read);
-            RequirePrivateFile(source);
+            using var source = OpenDataForRead(asset);
             FileDelivery.CopyVerified(asset, source, output);
         }
 
@@ -228,8 +239,10 @@ namespace Convoy
             if (planned > _maxBytes) throw new IOException("Convoy transfer exceeds the configured spool cap; increase the cap or select fewer mods");
             var keep = new HashSet<string>(assets.Select(Key), StringComparer.Ordinal);
             long cached = 0;
-            foreach (var group in Directory.EnumerateFiles(_paths.Resolve(Root)).Select(Path.GetFileName)
-                         .Where(TransferFile).GroupBy(n => Path.GetFileNameWithoutExtension(n)))
+            var names = Directory.EnumerateFiles(_paths.Resolve(Root)).Select(Path.GetFileName).ToArray();
+            // Unpublished Windows handles normally delete their files on close. Never reuse crash leftovers.
+            foreach (var name in names.Where(PreparedInstall.ScratchName)) File.Delete(CheckedEntry(name));
+            foreach (var group in names.Where(TransferFile).GroupBy(n => Path.GetFileNameWithoutExtension(n)))
             {
                 if (keep.Contains(group.Key)) continue;
                 var paths = group.Select(CheckedEntry).ToArray();
