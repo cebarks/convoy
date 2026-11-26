@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
+
 using System.Text;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -38,8 +38,8 @@ namespace Convoy
             _paths = new SyncFiles(_root, Array.Empty<ModState>());
             Origin = origin;
             _maxBytes = maxBytes;
-            using var hash = SHA256.Create();
-            _originKey = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(origin.AbsoluteUri))).Replace("-", "").ToLowerInvariant();
+            using var originBytes = new MemoryStream(Encoding.UTF8.GetBytes(origin.AbsoluteUri), false);
+            _originKey = Hash128.Compute(originBytes, default);
             lock (Held)
                 if (!Held.Add(_root)) throw new IOException("Another Convoy operation holds this game root; retry when it finishes");
             FileStream? handle = null;
@@ -149,8 +149,8 @@ namespace Convoy
 
         private string Key(DeliveryAsset asset)
         {
-            if (asset.Length < 0 || !DeliveryManifest.Hex(asset.Sha256, 64)) throw new InvalidDataException("Invalid staged asset");
-            return _originKey + "-" + asset.Sha256 + "-" + asset.Length.ToString(CultureInfo.InvariantCulture);
+            if (asset.Length < 0 || !DeliveryManifest.Hex(asset.Xxh3_128, 32)) throw new InvalidDataException("Invalid staged asset");
+            return "v3-" + _originKey + "-" + asset.Xxh3_128 + "-" + asset.Length.ToString(CultureInfo.InvariantCulture);
         }
         private string PathFor(DeliveryAsset asset, string suffix) => CheckedEntry(Key(asset) + suffix);
 
@@ -193,7 +193,7 @@ namespace Convoy
             {
                 var parts = File.ReadAllText(meta).Split('\n');
                 var length = new FileInfo(data).Length;
-                if (parts.Length == 2 && parts[0] == DeliveryManifest.Tag(asset.Sha256)
+                if (parts.Length == 2 && parts[0] == DeliveryManifest.Tag(asset.Xxh3_128)
                     && parts[1] == length.ToString(CultureInfo.InvariantCulture) && length <= asset.Length)
                     return new PartialState(data, asset.Length, length, parts[0]);
             }
@@ -203,7 +203,7 @@ namespace Convoy
 
         internal void SaveCheckpoint(DeliveryAsset asset, string etag, long persistedLength)
         {
-            if (etag != DeliveryManifest.Tag(asset.Sha256) || persistedLength < 0 || persistedLength > asset.Length
+            if (etag != DeliveryManifest.Tag(asset.Xxh3_128) || persistedLength < 0 || persistedLength > asset.Length
                 || new FileInfo(PathFor(asset, ".data")).Length != persistedLength) throw new IOException("Invalid Convoy checkpoint");
             var tmp = PathFor(asset, ".tmp");
             var meta = PathFor(asset, ".meta");
@@ -214,7 +214,7 @@ namespace Convoy
             else File.Move(tmp, meta);
         }
 
-        internal void MarkVerified(DeliveryAsset asset) => SaveCheckpoint(asset, DeliveryManifest.Tag(asset.Sha256), asset.Length);
+        internal void MarkVerified(DeliveryAsset asset) => SaveCheckpoint(asset, DeliveryManifest.Tag(asset.Xxh3_128), asset.Length);
         internal void Drop(DeliveryAsset asset)
         {
             File.Delete(PathFor(asset, ".meta"));
@@ -227,8 +227,8 @@ namespace Convoy
             var ext = Path.GetExtension(name);
             if (ext != ".meta" && ext != ".data" && ext != ".tmp") return false;
             var parts = Path.GetFileNameWithoutExtension(name).Split('-');
-            return parts.Length == 3 && DeliveryManifest.Hex(parts[0], 64) && DeliveryManifest.Hex(parts[1], 64)
-                && long.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out _);
+            return parts.Length == 4 && parts[0] == "v3" && DeliveryManifest.Hex(parts[1], 32) && DeliveryManifest.Hex(parts[2], 32)
+                && long.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out _);
         }
 
         internal void Reserve(DeliveryAsset[] assets, long applyBytes)

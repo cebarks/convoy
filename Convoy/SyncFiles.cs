@@ -216,8 +216,9 @@ namespace Convoy
                 yield return path.Substring(0, end);
         }
 
-        private static bool StoredMatches(DeliveryAsset actual, ModFileState file) => actual.Xxh3_64 == file.Hash
-            && (file.Sha256 == null || actual.Sha256 == file.Sha256) && (!file.Length.HasValue || actual.Length == file.Length.Value);
+        private static bool StoredMatches(DeliveryAsset actual, ModFileState file) => file.Sha256 == null
+            && DeliveryManifest.Hex(file.Hash, 32) && actual.Xxh3_128 == file.Hash
+            && (!file.Length.HasValue || actual.Length == file.Length.Value);
 
         internal DeliveryAsset? Observe(string path)
         {
@@ -235,8 +236,8 @@ namespace Convoy
 
         internal ModFileState Record(DeliveryAsset asset) => new ModFileState
         {
-            Path = asset.Path, Hash = _verified.Contains(asset.Path) ? asset.Xxh3_64 : "",
-            Owned = _ownership[asset.Path], Sha256 = _verified.Contains(asset.Path) ? asset.Sha256 : null,
+            Path = asset.Path, Hash = _verified.Contains(asset.Path) ? asset.Xxh3_128 : "",
+            Owned = _ownership[asset.Path], Sha256 = null,
             Length = _verified.Contains(asset.Path) ? (long?)asset.Length : null
         };
 

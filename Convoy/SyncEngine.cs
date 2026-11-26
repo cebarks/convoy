@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
+
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,21 +30,32 @@ namespace Convoy
         public string Generation { get; }
         public long ModId { get; }
         public string Path { get; }
-        public string PriorSha256 { get; }
-        public string NextSha256 { get; }
+        public string PriorXxh3_128 { get; }
+        public string NextXxh3_128 { get; }
 
-        public ReplacementConsent(string origin, string generation, long modId, string path, string priorSha256, string nextSha256)
+        public ReplacementConsent(string origin, string generation, long modId, string path, string priorXxh3_128, string nextXxh3_128)
         {
             Origin = FileDelivery.Origin(origin).GetLeftPart(UriPartial.Authority);
             Generation = generation;
             ModId = modId;
             Path = path;
-            PriorSha256 = priorSha256;
-            NextSha256 = nextSha256;
+            PriorXxh3_128 = priorXxh3_128;
+            NextXxh3_128 = nextXxh3_128;
         }
 
         internal bool Matches(ReplacementConsent other) => Origin == other.Origin && Generation == other.Generation
-            && ModId == other.ModId && Path == other.Path && PriorSha256 == other.PriorSha256 && NextSha256 == other.NextSha256;
+            && ModId == other.ModId && Path == other.Path && PriorXxh3_128 == other.PriorXxh3_128 && NextXxh3_128 == other.NextXxh3_128;
+    }
+
+    public sealed class LegacyPendingFile
+    {
+        public long ModId { get; internal set; }
+        public string Path { get; internal set; } = "";
+        public bool? PriorOwned { get; internal set; }
+        public string? ObservedXxh3_128 { get; internal set; }
+        public string? DesiredXxh3_128 { get; internal set; }
+        public long? ObservedLength { get; internal set; }
+        public long? DesiredLength { get; internal set; }
     }
 
     public class SyncPlan
@@ -57,6 +68,7 @@ namespace Convoy
             internal readonly Uri Origin;
             internal readonly ConvoyState.Snapshot Snapshot;
             internal readonly string Epoch;
+            internal LegacyPendingFile[] LegacyPending = Array.Empty<LegacyPendingFile>();
 
             internal ExecutionInput(DeliveryManifest catalog, Uri origin, ConvoyState.Snapshot snapshot, string epoch)
             { Catalog = catalog; Origin = origin; Snapshot = snapshot; Epoch = epoch; }
@@ -77,6 +89,7 @@ namespace Convoy
         public List<PlannedMod> Installs = new List<PlannedMod>();
         public List<PlannedMod> Updates = new List<PlannedMod>();
         public IReadOnlyList<ReplacementConsent> Replacements { get; internal set; } = Array.Empty<ReplacementConsent>();
+        public IReadOnlyList<LegacyPendingFile> LegacyPending { get; internal set; } = Array.Empty<LegacyPendingFile>();
         public List<PlannedMod> Removals = new List<PlannedMod>();
     }
 
@@ -91,6 +104,67 @@ namespace Convoy
         private readonly string _gameRoot;
         private readonly FileDelivery _delivery = new FileDelivery();
 
+        public SyncResult ApproveLegacy(SyncPlan plan, IReadOnlyList<LegacyPendingFile> approved, SyncProgress? progress = null,
+            IReadOnlyList<LegacyPendingFile>? replacements = null)
+        {
+            try
+            {
+                var captured = plan.Captured ?? throw new InvalidOperationException("Missing legacy plan; replan");
+                if (!ReferenceEquals(plan.Catalog, captured.Catalog) || ConfiguredOrigin() != captured.Origin
+                    || FileDelivery.Origin(plan.ServerUrl) != captured.Origin)
+                    throw new InvalidOperationException("Legacy plan origin or catalog changed; replan");
+                var grants = approved.ToArray();
+                var replace = (replacements ?? Array.Empty<LegacyPendingFile>()).ToArray();
+                if (grants.Length == 0 || grants.Distinct().Count() != grants.Length
+                    || grants.Any(g => !captured.LegacyPending.Contains(g)
+                        || g.ObservedXxh3_128 == null || g.DesiredXxh3_128 == null
+                        || (!LegacyMatches(g) && (!replace.Contains(g) || !LegacyReplaceable(g))))
+                    || replace.Distinct().Count() != replace.Length
+                    || replace.Any(g => !grants.Contains(g) || LegacyMatches(g) || !LegacyReplaceable(g))
+                    || captured.LegacyPending.Any(p => grants.Any(g => g.Path == p.Path) && !grants.Contains(p)))
+                    throw new InvalidOperationException("Legacy approval does not match all present eligible records; replan");
+                using var spool = TransferSpool.Acquire(_gameRoot, captured.Origin, _config.SpoolMaxBytes);
+                if (spool.Epoch() != captured.Epoch) throw new InvalidOperationException("Convoy state changed; replan");
+                if (replace.Length != 0)
+                    return ApplyLegacyReplacements(spool, captured, grants, replace, progress);
+                var state = captured.Snapshot.Parse();
+                CheckStateOrigin(state, captured.Origin);
+                var check = new SyncFiles(_gameRoot, state.Mods);
+                RequireStateAndOrigin(check, captured.Snapshot, captured.Origin);
+                var cancel = progress?.Token ?? default;
+                RequireCurrent(captured.Origin, captured.Catalog, progress, cancel);
+                foreach (var grant in grants)
+                {
+                    var actual = check.Observe(grant.Path);
+                    if (actual == null || actual.Xxh3_128 != grant.ObservedXxh3_128 || actual.Length != grant.ObservedLength)
+                        throw new IOException("Legacy file changed after approval; replan: " + grant.Path);
+                    var file = state.Mods.Single(m => m.Id == grant.ModId).Files.Single(f => f.Path == grant.Path);
+                    if (!IsLegacy(file) || file.Owned != grant.PriorOwned)
+                        throw new InvalidOperationException("Legacy ownership changed; replan");
+                    file.Legacy = new LegacyFileBaseline { Hash = file.Hash, Sha256 = file.Sha256, Length = file.Length, Owned = file.Owned };
+                    file.Hash = actual.Xxh3_128;
+                    file.Sha256 = null;
+                    file.Length = actual.Length;
+                }
+                progress?.BeforeStateSave?.Invoke();
+                var finalCheck = new SyncFiles(_gameRoot, captured.Snapshot.Parse().Mods);
+                foreach (var grant in grants)
+                {
+                    var actual = finalCheck.Observe(grant.Path);
+                    if (actual == null || actual.Xxh3_128 != grant.ObservedXxh3_128 || actual.Length != grant.ObservedLength)
+                        throw new IOException("Legacy file changed before state commit; replan: " + grant.Path);
+                }
+                RequireStateAndOrigin(finalCheck, captured.Snapshot, captured.Origin);
+                spool.RequireFree(StateBytes(state));
+                cancel.ThrowIfCancellationRequested();
+                progress?.BeginApply();
+                spool.AdvanceEpoch();
+                state.Save(captured.Snapshot.Target);
+                return SyncResult.Replan;
+            }
+            catch (Exception ex) { return Failed(ex, progress); }
+        }
+
         public SyncEngine(ManualLogSource log, ConvoyConfig config)
         {
             _log = log;
@@ -100,6 +174,80 @@ namespace Convoy
 
         private static Uri ConfiguredOrigin() => FileDelivery.Origin(SPT.Common.Http.RequestHandler.Host);
         private static string OriginName(Uri origin) => origin.GetLeftPart(UriPartial.Authority);
+        private static bool IsLegacy(ModFileState f) => !SyncFiles.Configuration(f.Path)
+            && (f.Sha256 != null || !DeliveryManifest.Hex(f.Hash, 32));
+        private static (ModState Mod, ModFileState File)[] LegacyRecords(DeliveryManifest catalog, ConvoyState state)
+        {
+            var selected = new HashSet<long>(catalog.Groups.Where(g => g.Tier == "required" || state.EnabledGroups.Contains(g.Slug))
+                .SelectMany(g => g.Mods).Select(m => m.Id));
+            return state.Mods.SelectMany(mod => mod.Files.Where(file => IsLegacy(file)
+                || (!selected.Contains(mod.Id) && SyncFiles.Configuration(file.Path)
+                    && (file.Sha256 != null || (!DeliveryManifest.Hex(file.Hash, 32)
+                        && (file.Hash != "" || file.Owned != false || file.Length != null)))))
+                .Select(file => (mod, file))).ToArray();
+        }
+        private static bool LegacyMatches(LegacyPendingFile file) => file.ObservedXxh3_128 == file.DesiredXxh3_128
+            && file.ObservedLength == file.DesiredLength;
+        private static bool LegacyReplaceable(LegacyPendingFile file) => file.Path.StartsWith("BepInEx/plugins/", StringComparison.Ordinal)
+            && file.Path.EndsWith(".dll", StringComparison.Ordinal) && !SyncFiles.Configuration(file.Path);
+
+        private static Dictionary<long, CatalogMod> LegacyTargets(DeliveryManifest catalog, ConvoyState state) => catalog.Groups
+            .Where(g => g.Tier == "required" || state.EnabledGroups.Contains(g.Slug))
+            .SelectMany(g => g.Mods.Where(m => g.Tier == "required" || !state.SkippedMods.Contains(m.Id)))
+            .ToDictionary(m => m.Id);
+
+        private SyncResult ApplyLegacyReplacements(TransferSpool spool, SyncPlan.ExecutionInput captured,
+            LegacyPendingFile[] grants, LegacyPendingFile[] replacements, SyncProgress? progress)
+        {
+            var cancel = progress?.Token ?? default;
+            var state = captured.Snapshot.Parse();
+            var virtualState = captured.Snapshot.Parse();
+            CheckStateOrigin(state, captured.Origin);
+            var published = LegacyTargets(captured.Catalog, state);
+            var incoming = new Dictionary<string, DeliveryAsset>(StringComparer.Ordinal);
+            foreach (var grant in grants)
+            {
+                var desired = published[grant.ModId].Assets.Single(a => a.Path == grant.Path);
+                if (captured.Catalog.Exclusions.Contains(grant.Path, StringComparer.OrdinalIgnoreCase)
+                    || desired.Xxh3_128 != grant.DesiredXxh3_128 || desired.Length != grant.DesiredLength)
+                    throw new InvalidOperationException("Legacy desired asset changed; replan");
+                incoming[grant.Path] = desired;
+                var original = state.Mods.Single(m => m.Id == grant.ModId).Files.Single(f => f.Path == grant.Path);
+                if (!IsLegacy(original) || original.Owned != grant.PriorOwned)
+                    throw new InvalidOperationException("Legacy ownership changed; replan");
+                var virtualFile = virtualState.Mods.Single(m => m.Id == grant.ModId).Files.Single(f => f.Path == grant.Path);
+                virtualFile.Hash = grant.ObservedXxh3_128!;
+                virtualFile.Length = grant.ObservedLength;
+                virtualFile.Sha256 = null;
+                if (replacements.Contains(grant)) virtualFile.Owned = false;
+                original.Legacy = new LegacyFileBaseline { Hash = original.Hash, Sha256 = original.Sha256,
+                    Length = original.Length, Owned = original.Owned };
+                original.Hash = desired.Xxh3_128;
+                original.Length = desired.Length;
+                original.Sha256 = null;
+            }
+            var transaction = new SyncFiles(_gameRoot, virtualState.Mods) { Progress = progress, Cancel = cancel };
+            RequireStateAndOrigin(transaction, captured.Snapshot, captured.Origin);
+            foreach (var grant in grants)
+            {
+                var actual = transaction.Observe(grant.Path);
+                if (actual == null || actual.Xxh3_128 != grant.ObservedXxh3_128 || actual.Length != grant.ObservedLength)
+                    throw new IOException("Legacy file changed after approval; replan: " + grant.Path);
+            }
+            var selected = new HashSet<(long, string)>(grants.Select(g => (g.ModId, g.Path)));
+            var retained = virtualState.Mods.SelectMany(m => m.Files.Where(f => !selected.Contains((m.Id, f.Path))));
+            bool Approved(DeliveryAsset desired, DeliveryAsset actual) => replacements.Any(g =>
+                g.Path == desired.Path && g.ObservedXxh3_128 == actual.Xxh3_128 && g.ObservedLength == actual.Length
+                && g.DesiredXxh3_128 == desired.Xxh3_128 && g.DesiredLength == desired.Length);
+            transaction.PreflightWithConsent(incoming, retained, Array.Empty<ModFileState>(), Approved, false);
+            var result = Apply(spool, captured.Origin, captured.Catalog, transaction, incoming, captured.Snapshot, () =>
+            {
+                progress?.BeforeStateSave?.Invoke();
+                RequireStateAndOrigin(transaction, captured.Snapshot, captured.Origin);
+                state.Save(captured.Snapshot.Target);
+            }, progress, cancel, StateBytes(state));
+            return result == SyncResult.UpToDate ? SyncResult.Replan : result;
+        }
 
         private static void CheckStateOrigin(ConvoyState state, Uri origin)
         {
@@ -114,6 +262,8 @@ namespace Convoy
         {
             if (catalog.Origin != origin) throw new InvalidOperationException("Convoy catalog belongs to another origin; fetch it again");
             CheckStateOrigin(state, origin);
+            if (LegacyRecords(catalog, state).Length != 0)
+                throw new InvalidOperationException("Legacy Convoy files require explicit rebaseline before syncing");
             var files = new SyncFiles(_gameRoot, state.Mods);
             GuardStateTarget(files);
             foreach (var path in catalog.Groups.SelectMany(g => g.Mods).SelectMany(m => m.Assets).Select(a => a.Path).Distinct())
@@ -143,24 +293,24 @@ namespace Convoy
 
         private static string Identity(CatalogMod mod)
         {
-            using var hash = SHA256.Create();
             var canonical = string.Join("\n", mod.Assets.OrderBy(a => a.Path, StringComparer.Ordinal)
-                .Select(a => a.Sha256 + " " + a.Xxh3_64 + " " + a.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + " " + a.Path));
-            return BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(canonical))).Replace("-", "").ToLowerInvariant();
+                .Select(a => a.Xxh3_128 + " " + a.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + " " + a.Path));
+            using var bytes = new MemoryStream(Encoding.UTF8.GetBytes(canonical), false);
+            return Hash128.Compute(bytes, default);
         }
 
         // A grant only describes a particular preimage; authority is derived again from the locked snapshot.
         private static ReplacementConsent? Candidate(DeliveryManifest catalog, ModState? previous, CatalogMod mod,
             DeliveryAsset asset, DeliveryAsset? actual, string nextIdentity)
         {
-            if (previous == null || !DeliveryManifest.Hex(previous.Manifest ?? "", 64)
+            if (previous == null || !DeliveryManifest.Hex(previous.Manifest ?? "", 32)
                 || (previous.Version == mod.Version && previous.Manifest == nextIdentity)
                 || actual == null || actual.Same(asset) || !asset.Path.StartsWith("BepInEx/plugins/", StringComparison.Ordinal)
                 || !asset.Path.EndsWith(".dll", StringComparison.Ordinal)) return null;
             var prior = previous.Files.SingleOrDefault(f => f.Path == asset.Path);
-            if (prior?.Owned != false || prior.Sha256 != actual.Sha256 || prior.Length != actual.Length || prior.Hash != actual.Xxh3_64)
+            if (prior?.Owned != false || prior.Sha256 != null || prior.Length != actual.Length || prior.Hash != actual.Xxh3_128)
                 return null;
-            return new ReplacementConsent(OriginName(catalog.Origin), catalog.Generation, mod.Id, asset.Path, actual.Sha256, asset.Sha256);
+            return new ReplacementConsent(OriginName(catalog.Origin), catalog.Generation, mod.Id, asset.Path, actual.Xxh3_128, asset.Xxh3_128);
         }
 
         private static bool ExactInventory(ModState installed, CatalogMod published)
@@ -172,7 +322,7 @@ namespace Convoy
                 var records = files[asset.Path];
                 if (records.Count() != 1) return false;
                 var record = records.Single();
-                return record.MatchesV2(asset) || (SyncFiles.Configuration(record.Path)
+                return record.MatchesV3(asset) || (SyncFiles.Configuration(record.Path)
                     && record.Owned == false && record.Hash == "" && record.Sha256 == null && record.Length == null);
             });
         }
@@ -187,6 +337,29 @@ namespace Convoy
             var snapshot = LoadState();
             var state = snapshot.Parse();
             CheckStateOrigin(state, origin);
+            var legacy = LegacyRecords(catalog, state);
+            if (legacy.Length != 0)
+            {
+                var input = new SyncPlan.ExecutionInput(catalog, origin, snapshot, spool.Epoch());
+                var pendingPlan = new SyncPlan(input) { State = state };
+                var oldFiles = new SyncFiles(_gameRoot, state.Mods);
+                var published = LegacyTargets(catalog, state);
+                input.LegacyPending = legacy.Select(record =>
+                {
+                    var mod = record.Mod;
+                    var file = record.File;
+                    var actual = oldFiles.Observe(file.Path);
+                    var desired = !SyncFiles.Configuration(file.Path)
+                        && !catalog.Exclusions.Contains(file.Path, StringComparer.OrdinalIgnoreCase)
+                        && published.TryGetValue(mod.Id, out var entry)
+                        ? entry.Assets.SingleOrDefault(asset => asset.Path == file.Path) : null;
+                    return new LegacyPendingFile { ModId = mod.Id, Path = file.Path, PriorOwned = file.Owned,
+                        ObservedXxh3_128 = actual?.Xxh3_128, ObservedLength = actual?.Length,
+                        DesiredXxh3_128 = desired?.Xxh3_128, DesiredLength = desired?.Length };
+                }).ToArray();
+                pendingPlan.LegacyPending = Array.AsReadOnly(input.LegacyPending);
+                return pendingPlan;
+            }
             var files = Guard(catalog, state, origin, progress?.Token ?? default);
             var plan = new SyncPlan(new SyncPlan.ExecutionInput(catalog, origin, snapshot, spool.Epoch())) { State = state };
             files.Progress = progress;
@@ -214,11 +387,11 @@ namespace Convoy
                         || mod.Assets.Any(a => !File.Exists(files.Resolve(a.Path))))
                     {
                         plan.Updates.Add(row);
-                        var candidates = existing.Files.Where(f => f.Owned == false && f.Sha256 != null)
+                        var candidates = existing.Files.Where(f => f.Owned == false && DeliveryManifest.Hex(f.Hash, 32) && f.Sha256 == null)
                             .ToLookup(f => f.Path, StringComparer.Ordinal);
                         foreach (var asset in mod.Files.Where(a => a.Path.StartsWith("BepInEx/plugins/", StringComparison.Ordinal)
                             && a.Path.EndsWith(".dll", StringComparison.Ordinal) && candidates.Contains(a.Path)
-                            && candidates[a.Path].Any(f => f.Sha256 != a.Sha256)))
+                            && candidates[a.Path].Any(f => f.Hash != a.Xxh3_128)))
                         {
                             var replacement = Candidate(catalog, existing, mod, asset, files.Observe(asset.Path), nextIdentity!);
                             if (replacement != null) replacements.Add(replacement);
@@ -381,8 +554,27 @@ namespace Convoy
             transaction.PreflightWithConsent(incoming, retained.SelectMany(m => m.Files), state.Mods
                 .Where(m => confirmed.Contains(m.Id) || removed.Contains(m.Id)).SelectMany(m => m.Files).Where(f => !excluded.Contains(f.Path)), Approved, repair);
             if (used.Count != consents.Count) throw new IOException("Replacement consent no longer matches the accepted update and installed original; replan");
-            var updatedMods = accepted.ToDictionary(m => m.Id, m => new ModState { Id = m.Id, Version = m.Version,
-                Manifest = identities[m.Id], Files = m.Assets.Select(transaction.Record).ToList() });
+            var updatedMods = accepted.ToDictionary(m => m.Id, m =>
+            {
+                installed.TryGetValue(m.Id, out var prior);
+                var records = m.Assets.Select(asset =>
+                {
+                    var record = transaction.Record(asset);
+                    if (prior != null)
+                    {
+                        var priorFile = prior.Files.SingleOrDefault(f => f.Path == asset.Path);
+                        if (priorFile != null && SyncFiles.Configuration(asset.Path)) return priorFile;
+                        record.Legacy = priorFile?.Legacy;
+                    }
+                    return record;
+                }).ToList();
+                if (prior != null)
+                {
+                    var paths = new HashSet<string>(records.Select(f => f.Path), StringComparer.Ordinal);
+                    records.AddRange(prior.Files.Where(f => SyncFiles.Configuration(f.Path) && !paths.Contains(f.Path)));
+                }
+                return new ModState { Id = m.Id, Version = m.Version, Manifest = identities[m.Id], Files = records };
+            });
             var next = repair ? state.Mods.Select(m => updatedMods.TryGetValue(m.Id, out var update) ? update : m).ToList()
                 : retained.Concat(updatedMods.Values).ToList();
             var skipped = new HashSet<long>(skippedModIds);
@@ -420,7 +612,7 @@ namespace Convoy
             ConvoyState.Snapshot snapshot, Action saveState, SyncProgress? progress, CancellationToken cancel, long stateBytes = 0, bool force = false)
         {
             var writes = files.Writes.Select(path => incoming[path]).ToArray();
-            var unique = (force ? incoming.Values.Where(a => files.RepairEligible(a.Path)) : writes).GroupBy(a => a.Sha256).Select(g => g.First()).ToArray();
+            var unique = (force ? incoming.Values.Where(a => files.RepairEligible(a.Path)) : writes).GroupBy(a => a.Xxh3_128).Select(g => g.First()).ToArray();
             var metadataBytes = checked(stateBytes + (writes.LongLength + files.RemovalCount) * 4096 + 64 * 1024L);
             var applyBytes = checked(writes.Sum(a => a.Length) + metadataBytes); // Existing rollback files are renamed, not copied.
             void CheckVolumes() => spool.CheckVolumes(files.Mutations.Concat(files.RecoveryPaths).Select(files.Resolve).Append(snapshot.Target), VolumeIdentity);

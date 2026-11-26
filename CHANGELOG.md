@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.8.0] - 2026-11-26
+
 ### Changed
 
 - Check and re-verify installed files with up to the logical processor count reported by .NET minus two parallel readers (minimum one), and download up to sixteen distinct objects at a time. Verified installation and rollback remain serial.
@@ -9,10 +11,12 @@
 
 ### Breaking
 
-- Require a paired Convoy v2 Quartermaster publisher. Sync and repair stream verified, resumable file objects without legacy ZIP fallback. Install the standalone client package with the game closed.
+- Require the paired Convoy v3 publisher in Quartermaster v0.6.0. File proofs, objects, generations and transfer checkpoints use canonical XXH3-128 identities and byte lengths; no legacy ZIP or checksum fallback is used. Install the standalone client package with the game closed.
+- Keep legacy state pending until explicit player review. Matching approvals retain ownership and historical evidence; differing plugin DLLs require separate backup-and-replace consent. Disabled or skipped optional files cannot be approved or replaced.
 
 ### Fixed
 
+- Allow game installations beneath linked parent directories while retaining protections on the game root and internal destinations.
 - Install package-tracked direct Managed DLL dependencies advertised by Quartermaster, including same-version manifest additions.
 - Validate supported canonical roots, case aliases, reparse destinations, complete checksums and delivery identities before changes; reject conflicting entries rather than ignoring them.
 - Preserve existing matching unowned files without adopting them, preserve BepInEx configuration, reject conflicting local assemblies, and remove only unchanged owned files no retained mod needs.
