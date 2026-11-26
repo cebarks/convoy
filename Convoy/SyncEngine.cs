@@ -85,7 +85,7 @@ namespace Convoy
     public class SyncEngine
     {
         private const string StatePath = "BepInEx/config/Convoy/state.json";
-        private const int DownloadWorkers = 8;
+        private const int DownloadWorkers = 16;
         private readonly ManualLogSource _log;
         private readonly ConvoyConfig _config;
         private readonly string _gameRoot;
