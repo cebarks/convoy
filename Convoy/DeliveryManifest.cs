@@ -11,13 +11,12 @@ namespace Convoy
     {
         public string Path { get; }
         public long Length { get; }
-        public string Sha256 { get; }
-        public string Xxh3_64 { get; }
+        public string Xxh3_128 { get; }
 
-        internal DeliveryAsset(string path, long length, string sha256, string xxh3)
-        { Path = path; Length = length; Sha256 = sha256; Xxh3_64 = xxh3; }
+        internal DeliveryAsset(string path, long length, string xxh3)
+        { Path = path; Length = length; Xxh3_128 = xxh3; }
 
-        internal bool Same(DeliveryAsset other) => Length == other.Length && Sha256 == other.Sha256 && Xxh3_64 == other.Xxh3_64;
+        internal bool Same(DeliveryAsset other) => Length == other.Length && Xxh3_128 == other.Xxh3_128;
     }
 
     public sealed class CatalogMod
@@ -68,7 +67,7 @@ namespace Convoy
 
         internal static bool Hex(string value, int length) => value.Length == length && value.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
         internal static string Tag(string digest) => "\"" + digest + "\"";
-        private static InvalidDataException Invalid(string field) => new InvalidDataException("Invalid Convoy v2 catalog: " + field);
+        private static InvalidDataException Invalid(string field) => new InvalidDataException("Invalid Convoy v3 catalog: " + field);
         private static JToken Field(JToken value, string name) => (value as JObject)?[name] ?? throw Invalid(name);
         private static string Text(JToken value) => value.Type == JTokenType.String ? (string)value! : throw Invalid("expected string");
         private static long Integer(JToken value) => value.Type == JTokenType.Integer && ((JValue)value).Value is long n ? n : throw Invalid("expected signed 64-bit integer");
@@ -152,9 +151,9 @@ namespace Convoy
             CheckJsonTokens(json);
             using var reader = new JsonTextReader(new StringReader(json)) { DateParseHandling = DateParseHandling.None, MaxDepth = 32 };
             var root = JObject.Load(reader, new JsonLoadSettings { DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error });
-            if (reader.Read() || Integer(Field(root, "protocol")) != 2) throw Invalid("protocol");
+            if (reader.Read() || Integer(Field(root, "protocol")) != 3) throw Invalid("protocol");
             var generation = Text(Field(root, "generation"));
-            if (!Hex(generation, 64) || Tag(generation) != etag) throw Invalid("generation / ETag disagreement");
+            if (!Hex(generation, 32) || Tag(generation) != etag) throw Invalid("generation / ETag disagreement");
             var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var assets = new Dictionary<string, DeliveryAsset>(StringComparer.OrdinalIgnoreCase);
             var digests = new Dictionary<string, DeliveryAsset>(StringComparer.Ordinal);
@@ -166,13 +165,12 @@ namespace Convoy
             {
                 var path = Text(Field(token, "path"));
                 var length = Integer(Field(token, "length"));
-                var sha = Text(Field(token, "sha256"));
-                var xxh = Text(Field(token, "xxh3_64"));
-                if (length < 0 || !Hex(sha, 64) || !Hex(xxh, 16) || !SyncFiles.Allowed(path)
+                var xxh = Text(Field(token, "xxh3_128"));
+                if (length < 0 || !Hex(xxh, 32) || !SyncFiles.Allowed(path)
                     || path.Equals("BepInEx/config", StringComparison.OrdinalIgnoreCase) || SyncFiles.Private(path) || SyncFiles.Bundle(path) != bundle || !own.Add(path)) throw Invalid(path);
-                var asset = new DeliveryAsset(path, length, sha, xxh);
+                var asset = new DeliveryAsset(path, length, xxh);
                 if (directories.Contains(path) || (assets.TryGetValue(path, out var previous) && !previous.Same(asset))
-                    || (digests.TryGetValue(sha, out var sameDigest) && !sameDigest.Same(asset))) throw Invalid(path);
+                    || (digests.TryGetValue(xxh, out var sameDigest) && !sameDigest.Same(asset))) throw Invalid(path);
                 for (var end = path.Length; end > 0;)
                 {
                     var prefix = path.Substring(0, end);
@@ -186,7 +184,7 @@ namespace Convoy
                         directories.Add(parent);
                     }
                 }
-                assets[path] = digests[sha] = asset;
+                assets[path] = digests[xxh] = asset;
                 return asset;
             }
 

@@ -6,10 +6,22 @@ using Newtonsoft.Json;
 
 namespace Convoy
 {
+    public sealed class LegacyFileBaseline
+    {
+        [JsonProperty("hash")]
+        public string Hash { get; set; } = "";
+        [JsonProperty("sha256", NullValueHandling = NullValueHandling.Ignore)]
+        public string? Sha256 { get; set; }
+        [JsonProperty("length", NullValueHandling = NullValueHandling.Ignore)]
+        public long? Length { get; set; }
+        [JsonProperty("owned")]
+        public bool? Owned { get; set; }
+    }
+
     public class ModFileState
     {
-        internal bool MatchesV2(DeliveryAsset asset) => Path == asset.Path && Sha256 == asset.Sha256
-            && Length == asset.Length && Hash == asset.Xxh3_64 && Owned.HasValue;
+        internal bool MatchesV3(DeliveryAsset asset) => Path == asset.Path && Sha256 == null
+            && Length == asset.Length && Hash == asset.Xxh3_128 && Owned.HasValue;
 
         [JsonProperty("path")]
         public string Path { get; set; } = "";
@@ -26,6 +38,9 @@ namespace Convoy
 
         [JsonProperty("length", NullValueHandling = NullValueHandling.Ignore)]
         public long? Length { get; set; }
+
+        [JsonProperty("legacy", NullValueHandling = NullValueHandling.Ignore)]
+        public LegacyFileBaseline? Legacy { get; set; }
     }
 
     public class ModState

@@ -40,7 +40,7 @@ namespace Convoy
         {
             _windows = windows;
             _paths = paths;
-            _objects = writes.ToLookup(asset => asset.Sha256, asset => paths[asset.Path], StringComparer.Ordinal);
+            _objects = writes.ToLookup(asset => asset.Xxh3_128, asset => paths[asset.Path], StringComparer.Ordinal);
         }
 
         internal static PreparedInstall? TryCreate(string directory, DeliveryAsset[] writes, CancellationToken cancel)
@@ -84,8 +84,8 @@ namespace Convoy
 
         internal bool Verify(DeliveryAsset asset, Stream source, CancellationToken cancel)
         {
-            if (!_objects.Contains(asset.Sha256)) return FileDelivery.VerifyBytes(asset, source, cancel);
-            var slots = _objects[asset.Sha256];
+            if (!_objects.Contains(asset.Xxh3_128)) return FileDelivery.VerifyBytes(asset, source, cancel);
+            var slots = _objects[asset.Xxh3_128];
             foreach (var slot in slots)
             {
                 cancel.ThrowIfCancellationRequested();

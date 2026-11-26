@@ -9,7 +9,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
-using System.Security.Cryptography;
+
 using System.Text;
 using System.Threading;
 using BepInEx;
@@ -28,9 +28,9 @@ internal static class Program
     private const string Bundle = "SPT_Runtime/user/cache/bundles/fixture.bundle";
     private const string Managed = "EscapeFromTarkov_Data/Managed/Unity.VectorGraphics.dll";
     private const string Config = "BepInEx/config/fixture.cfg";
-    private const string Abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-    private const string Empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    private const string LargeDigest = "3b6a07d0d404fab4e23b6d34bc6696a6a312dd92821332385e5af7c01c421351";
+    private const string Abc = "06b05ab6733a618578af5f94892f3950";
+    private const string Empty = "99aa06d3014798d86001c324468d497f";
+    private const string LargeDigest = "8c5a2179ae9f1c910939aaa27d431ff2";
     private const int LargeLength = 64 * 1024 * 1024;
 
     private static int Main()
@@ -42,6 +42,7 @@ internal static class Program
         handler.GetField("SessionId")!.SetValue(null, "convoy-regression-fixture");
         var tests = new List<(string Name, Action<GameFixture> Run)>
         {
+            ("v3 canonical xxh3-128 stream vectors", g => CanonicalHash128()),
             ("v2 resumes only unfinished object", g => g.Resume()),
             ("v2 second process does not acquire root", g => g.Exclusive()),
             ("v2 staging cap", g => g.Cap()),
@@ -96,6 +97,28 @@ internal static class Program
             ("v2 matching install downloads nothing", g => g.Install(true, true)),
             ("v2 mostly matching install downloads only missing asset", g => g.Install(true, false)),
             ("v2 ordinary no-op", g => g.NoOp()),
+            ("v3 matching legacy approval retains owned evidence", g => g.LegacyMatching(true)),
+            ("v3 matching legacy approval retains unowned evidence", g => g.LegacyMatching(false)),
+            ("v3 changed legacy approval preserves state", g => g.LegacyBlocked("changed")),
+            ("v3 declined legacy approval preserves state", g => g.LegacyBlocked("declined")),
+            ("v3 missing legacy file stays pending", g => g.LegacyBlocked("missing")),
+            ("v3 removed legacy mod stays pending", g => g.LegacyBlocked("removed")),
+            ("v3 differing legacy file stays pending", g => g.LegacyBlocked("different")),
+            ("v3 owned legacy differing replacement requires backup", g => g.LegacyDifferent(true, false)),
+            ("v3 unowned legacy differing replacement requires backup", g => g.LegacyDifferent(false, false)),
+            ("v3 legacy differing replacement rollback", g => g.LegacyDifferent(true, true)),
+            ("v3 shared legacy file requires all owners", g => g.LegacyShared()),
+            ("v3 excluded legacy file stays pending", g => g.LegacyBlocked("excluded")),
+            ("v3 late legacy edit preserves state", g => g.LegacyBlocked("final-edit")),
+            ("v3 injected legacy pre-save failure preserves state", g => g.LegacyBlocked("state-io")),
+            ("v3 legacy config evidence survives normal sync", g => g.LegacyConfig(false)),
+            ("v3 removed config evidence survives mod update", g => g.LegacyConfig(true)),
+            ("v3 removed mod retains pending legacy config", g => g.LegacyRemovedConfig(false)),
+            ("v3 disabled optional mod retains pending legacy config", g => g.LegacyRemovedConfig(true)),
+            ("v3 disabled matching legacy DLL cannot be approved or removed", g => g.LegacyUnselected(false, false)),
+            ("v3 disabled differing legacy DLL cannot be replaced", g => g.LegacyUnselected(false, true)),
+            ("v3 skipped matching legacy DLL cannot be approved", g => g.LegacyUnselected(true, false)),
+            ("v3 skipped differing legacy DLL cannot be replaced", g => g.LegacyUnselected(true, true)),
             ("v2 state authority changed after planning", g => g.StaleState(false)),
             ("v2 absent state appeared after planning", g => g.StaleState(true)),
             ("v2 state changes during publication check abort", g => g.ConditionalState(false)),
@@ -108,9 +131,16 @@ internal static class Program
             ("v2 rejects case alias", g => g.BadManifest(m => m.Add(Second.ToUpperInvariant().Replace("BEPINEX/", "BepInEx/"), "abc"))),
             ("v2 rejects aliased parents", g => g.BadManifest(m => m.Add("BepInEx/plugins/Fixture/child.dll", "abc"))),
             ("v2 rejects duplicate IDs", g => g.InvalidCatalog((doc, _) => ((JArray)doc["groups"]![0]!["mods"]!).Add(doc["groups"]![1]!["mods"]![0]!.DeepClone()))),
-            ("v2 rejects duplicate JSON properties", g => g.InvalidCatalog(null, json => json.Replace("\"protocol\":2", "\"protocol\":2,\"protocol\":2"))),
-            ("v2 rejects non-JSON numeric spelling", g => g.InvalidCatalog(null, json => json.Replace("\"protocol\":2", "\"protocol\":02"))),
-            ("v2 rejects single quoted JSON", g => g.InvalidCatalog(null, json => json.Replace("\"protocol\":2", "'protocol':2"))),
+            ("v3 rejects v2 catalog without mutation", g => g.InvalidCatalog((doc, _) => doc["protocol"] = 2)),
+            ("v3 rejects legacy-only object hash without mutation", g => g.InvalidCatalog((doc, _) =>
+            {
+                var file = (JObject)doc["groups"]![1]!["mods"]![0]!["files"]![0]!;
+                file.Remove("xxh3_128");
+                file["sha256"] = new string('a', 64);
+            })),
+            ("v2 rejects duplicate JSON properties", g => g.InvalidCatalog(null, json => json.Replace("\"protocol\":3", "\"protocol\":3,\"protocol\":3"))),
+            ("v2 rejects non-JSON numeric spelling", g => g.InvalidCatalog(null, json => json.Replace("\"protocol\":3", "\"protocol\":03"))),
+            ("v2 rejects single quoted JSON", g => g.InvalidCatalog(null, json => json.Replace("\"protocol\":3", "'protocol':3"))),
             ("v2 rejects non-integer length", g => g.InvalidCatalog((doc, _) => doc["groups"]![1]!["mods"]![0]!["files"]![0]!["length"] = 3.0)),
             ("v2 rejects wrong manifest validator", g => g.InvalidCatalog((doc, _) => doc["generation"] = new string('f', 64))),
             ("v2 rejects wrong origin", g => g.WrongOrigin("http://127.0.0.1:1")),
@@ -207,24 +237,37 @@ internal static class Program
     private static void PrintAssemblies()
     {
         Console.WriteLine($"ASSEMBLY {typeof(SyncEngine).Assembly.Location}");
-        Console.WriteLine($"HASHING {typeof(XxHash3).Assembly.Location}");
+        Console.WriteLine($"HASHING {typeof(XxHash128).Assembly.Location}");
         Console.WriteLine($"HARNESS {Assembly.GetExecutingAssembly().Location}");
     }
 
     private static void Check(bool condition, string message)
     { if (!condition) throw new InvalidOperationException(message); }
 
-    private static string Sha(string bytes)
+    private static void CanonicalHash128()
     {
-        using var sha = SHA256.Create();
-        return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(bytes)));
+        var type = typeof(SyncEngine).Assembly.GetType("Convoy.Hash128", true)!;
+        var compute = type.GetMethod("Compute", BindingFlags.Static | BindingFlags.NonPublic)!;
+        foreach (var item in new[] {
+            ("", "99aa06d3014798d86001c324468d497f"),
+            ("abc", "06b05ab6733a618578af5f94892f3950"),
+            (new string('a', 241), "3e7bebe4a2c07b0bf6cfef5c5aca1930"),
+            (new string('a', 65543), "59d041bffd9e50c9d1a2c3c2588483e8")
+        })
+        {
+            using var source = new MemoryStream(Encoding.UTF8.GetBytes(item.Item1));
+            var actual = (string)compute.Invoke(null, new object[] { source, CancellationToken.None })!;
+            Check(actual == item.Item2, "wrong canonical XXH3-128 digest for length " + item.Item1.Length + ": " + actual);
+        }
     }
 
+    private static string Sha(string bytes) => Hash(bytes);
+
     private static string Hex(byte[] hash) => BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
-    private static string Hash(string bytes) => XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(bytes)).ToString("x16");
+    private static string Hash(string bytes) => Hex(XxHash128.Hash(Encoding.UTF8.GetBytes(bytes)));
 
     private static DeliveryAsset MakeAsset(string path, string data) => (DeliveryAsset)Activator.CreateInstance(typeof(DeliveryAsset),
-        BindingFlags.Instance | BindingFlags.NonPublic, null, new object[] { path, (long)Encoding.UTF8.GetByteCount(data), Sha(data), Hash(data) }, null)!;
+        BindingFlags.Instance | BindingFlags.NonPublic, null, new object[] { path, (long)Encoding.UTF8.GetByteCount(data), Hash(data) }, null)!;
 
     private sealed class ManifestMod
     {
@@ -290,6 +333,172 @@ internal static class Program
         private SyncResult Run(SyncPlan plan, params long[] decline) => _engine.ExecuteSync(plan,
             plan.Installs.Concat(plan.Updates).Select(m => m.Id).Except(decline).ToList(), new HashSet<long>(decline), Array.Empty<ReplacementConsent>());
         private SyncResult Run() => Run(Plan());
+
+        public void LegacyMatching(bool owned)
+        {
+            _server.Publish(Required());
+            Write(First, "abc");
+            _state.Mods.Single().Files.Clear();
+            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = owned,
+                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
+            _state.Save();
+            var before = ReadState();
+            var plan = Plan();
+            Check(ReadState() == before && ReadIfPresent(First) == "abc", "planning changed legacy evidence");
+            Check(plan.LegacyPending.Count == 1, "missing legacy preview");
+            var pending = plan.LegacyPending.Single();
+            Check(pending.Path == First && pending.ModId == Id && pending.PriorOwned == owned
+                && pending.ObservedXxh3_128 == Abc && pending.DesiredXxh3_128 == Abc, "incorrect legacy preview");
+            Check(_engine.ApproveLegacy(plan, new[] { pending }) == SyncResult.Replan, "matching approval did not replan");
+            var record = ConvoyState.Load().Mods.Single().Files.Single();
+            Check(record.Owned == owned && record.Hash == Abc && record.Sha256 == null
+                && record.Legacy != null && record.Legacy.Hash == "0123456789abcdef"
+                && record.Legacy.Sha256 == new string('a', 64) && record.Legacy.Owned == owned,
+                "approval lost original ownership or evidence");
+            Check(ReadIfPresent(First) == "abc" && ReadIfPresent(Unrelated) == "locally owned", "approval changed live bytes");
+            var next = Plan();
+            Check(Run(next) == SyncResult.UpToDate, "matching post-approval sync unexpectedly modified files");
+            var afterSync = ConvoyState.Load().Mods.Single().Files.Single();
+            Check(afterSync.Owned == owned && afterSync.Legacy != null && afterSync.Legacy.Hash == "0123456789abcdef",
+                "normal sync discarded legacy ownership evidence");
+        }
+
+        public void LegacyBlocked(string mode)
+        {
+            _server.Publish(mode == "removed" ? new ManifestMod { Id = Id + 1 }.Add(Second, "def") : Required());
+            if (mode == "excluded") _server.Edit((doc, _) => doc["exclusions"] = new JArray(First), null);
+            if (mode != "missing") Write(First, mode == "different" ? "user edit" : "abc");
+            _state.Mods.Single().Files.Clear();
+            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = true,
+                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
+            _state.Save();
+            var before = ReadState();
+            var plan = Plan();
+            var pending = plan.LegacyPending.Single();
+            if (mode == "changed") Write(First, "edited after preview");
+            var progress = new SyncProgress();
+            if (mode == "final-edit") SetObserver(progress, "BeforeStateSave", (Action)(() => Write(First, "late edit")));
+            if (mode == "state-io") SetObserver(progress, "BeforeStateSave", (Action)(() => throw new IOException("injected state failure")));
+            var grants = mode == "declined" ? Array.Empty<LegacyPendingFile>() : new[] { pending };
+            Check(_engine.ApproveLegacy(plan, grants, progress) == SyncResult.Failed, "unsafe legacy approval succeeded");
+            var expected = mode == "missing" ? null : mode == "changed" ? "edited after preview"
+                : mode == "final-edit" ? "late edit" : mode == "different" ? "user edit" : "abc";
+            Check(ReadState() == before && ReadIfPresent(First) == expected && ReadIfPresent(Unrelated) == "locally owned",
+                "blocked approval changed evidence or live files");
+        }
+
+        public void LegacyConfig(bool removed)
+        {
+            var mod = Required();
+            if (!removed) mod.Add(Config, "new defaults");
+            _server.Publish(mod);
+            Write(Config, "local preferences");
+            _state.Mods.Single().Files.Add(new ModFileState { Path = Config, Owned = true,
+                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 12 });
+            _state.Save();
+            Check(Run() == SyncResult.RestartRequired, "expected ordinary update");
+            var record = ConvoyState.Load().Mods.Single().Files.Single(f => f.Path == Config);
+            Check(ReadIfPresent(Config) == "local preferences" && record.Owned == true
+                && record.Hash == "0123456789abcdef" && record.Sha256 == new string('a', 64) && record.Length == 12,
+                "normal sync discarded protected config contents or legacy evidence");
+        }
+
+        public void LegacyDifferent(bool owned, bool fail)
+        {
+            _server.Publish(Required());
+            Write(First, "user edit");
+            _state.Mods.Single().Files.Clear();
+            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = owned,
+                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
+            _state.Save();
+            var before = ReadState();
+            var plan = Plan();
+            var item = plan.LegacyPending.Single();
+            var progress = new SyncProgress();
+            if (fail) SetObserver(progress, "BeforeStateSave", (Action)(() => throw new IOException("injected failure after placement")));
+            var result = _engine.ApproveLegacy(plan, new[] { item }, progress, new[] { item });
+            var recovery = Path.Combine(_root, "BepInEx/config/Convoy/recovery");
+            var backups = Directory.Exists(recovery) ? Directory.GetFiles(recovery, "*.dll") : Array.Empty<string>();
+            Check(backups.Length == 1 && File.ReadAllText(backups[0]) == "user edit", "backup did not preserve exact prior bytes");
+            if (fail)
+                Check(result == SyncResult.Failed && ReadIfPresent(First) == "user edit" && ReadState() == before,
+                    "failed state save did not restore original bytes and state");
+            else
+            {
+                var record = ConvoyState.Load().Mods.Single().Files.Single();
+                Check(result == SyncResult.RestartRequired && ReadIfPresent(First) == "abc"
+                    && record.Owned == owned && record.Hash == Abc && record.Legacy?.Owned == owned
+                    && record.Legacy.Hash == "0123456789abcdef", "replacement lost ownership or evidence");
+            }
+            Check(ReadIfPresent(Unrelated) == "locally owned", "replacement changed unrelated bytes");
+        }
+
+        public void LegacyShared()
+        {
+            _server.Publish(Required(), new ManifestMod { Id = Id + 1 }.Add(First, "abc"));
+            Write(First, "abc");
+            _state.Mods.Clear();
+            foreach (var id in new[] { Id, Id + 1 })
+                _state.Mods.Add(new ModState { Id = id, Version = "old", Files = {
+                    new ModFileState { Path = First, Owned = true, Hash = "0123456789abcdef" } } });
+            _state.Save();
+            var before = ReadState();
+            var plan = Plan();
+            Check(plan.LegacyPending.Count == 2, "shared legacy owners not shown");
+            Check(_engine.ApproveLegacy(plan, new[] { plan.LegacyPending[0] }) == SyncResult.Failed
+                && ReadState() == before, "partial shared approval changed state");
+            Check(_engine.ApproveLegacy(plan, plan.LegacyPending) == SyncResult.Replan, "complete shared approval failed");
+            var saved = ConvoyState.Load();
+            Check(saved.Mods.Count == 2 && saved.Mods.All(m => m.Files.Single().Hash == Abc
+                && m.Files.Single().Owned == true && m.Files.Single().Legacy?.Hash == "0123456789abcdef")
+                && ReadIfPresent(First) == "abc", "shared approval lost records or changed bytes");
+        }
+
+        public void LegacyRemovedConfig(bool optional)
+        {
+            _server.Publish(optional ? Optional(Id).Add(Config, "server defaults") :
+                new ManifestMod { Id = Id + 1 }.Add(Second, "def"));
+            Write(Config, "local preferences");
+            _state.Mods.Single().Files.Clear();
+            _state.Mods.Single().Files.Add(new ModFileState { Path = Config, Owned = true,
+                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 12 });
+            if (optional) _state.EnabledGroups.Clear();
+            _state.Save();
+            var before = ReadState();
+            var plan = Plan();
+            Check(plan.LegacyPending.Count == 1, "removed legacy config was not pending");
+            var pending = plan.LegacyPending.Single();
+            Check(pending.ModId == Id && pending.Path == Config && pending.DesiredXxh3_128 == null,
+                "removed config incorrectly eligible for approval");
+            Check(_engine.ApproveLegacy(plan, new[] { pending }) == SyncResult.Failed, "removed config was approved");
+            Check(ReadState() == before && ReadIfPresent(Config) == "local preferences"
+                && ReadIfPresent(Unrelated) == "locally owned", "removed config lost bytes or historical state");
+        }
+
+        public void LegacyUnselected(bool skipped, bool different)
+        {
+            _server.Publish(Optional(Id).Add(First, "abc"));
+            var bytes = different ? "local edit" : "abc";
+            Write(First, bytes);
+            _state.Mods.Single().Files.Clear();
+            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = true,
+                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
+            if (skipped) _state.SkippedMods.Add(Id);
+            else _state.EnabledGroups.Clear();
+            _state.Save();
+            var before = ReadState();
+            var plan = Plan();
+            var pending = plan.LegacyPending.Single();
+            Check(_engine.ApproveLegacy(plan, new[] { pending }, replacements: different ? new[] { pending } : null)
+                == SyncResult.Failed, "unselected legacy DLL approval succeeded");
+            Check(pending.DesiredXxh3_128 == null && pending.DesiredLength == null,
+                "unselected legacy DLL advertised an eligible desired asset");
+            Check(ReadState() == before && ReadIfPresent(First) == bytes,
+                "unselected legacy approval changed bytes or historical state");
+            Check(Run() == SyncResult.Failed && ReadState() == before && ReadIfPresent(First) == bytes,
+                "subsequent normal sync retired unselected legacy evidence or bytes");
+            _server.ExpectObjects();
+        }
 
         public static int Child(string root)
         {
@@ -1030,7 +1239,7 @@ internal static class Program
             Check(state.Mods.Select(m => m.Id).OrderBy(x => x).SequenceEqual(new[] { Id, Id + 1 }), "64-bit mod IDs changed");
             var files = state.Mods.SelectMany(m => m.Files).ToDictionary(f => f.Path);
             Check(files[First].Owned == !firstExists && files[Second].Owned == !secondExists, "wrong ownership for matching paths");
-            Check(files[First].Sha256 == Abc && files[Second].Length == 3 && files[Config].Sha256 == null && files[Config].Owned == false, "incorrect proof for installed or preserved files");
+            Check(files[First].Hash == Abc && files[First].Sha256 == null && files[Second].Length == 3 && files[Config].Sha256 == null && files[Config].Owned == false, "incorrect proof for installed or preserved files");
         }
 
         public void NoOp()
@@ -1116,9 +1325,12 @@ internal static class Program
             Check(Run() == SyncResult.RestartRequired, "large verified object was not installed");
             var path = Path.Combine(_root, First);
             Check(new FileInfo(path).Length == LargeLength, "large object length changed");
-            using var sha = SHA256.Create();
             using var file = File.OpenRead(path);
-            Check(Hex(sha.ComputeHash(file)) == LargeDigest, "large object checksum changed");
+            var hash = new XxHash128();
+            var buffer = new byte[64 * 1024];
+            int count;
+            while ((count = file.Read(buffer, 0, buffer.Length)) != 0) hash.Append(buffer.AsSpan(0, count));
+            Check(Hex(hash.GetCurrentHash()) == LargeDigest, "large object checksum changed");
             _server.ExpectObjects(LargeDigest);
         }
 
@@ -1387,8 +1599,8 @@ internal static class Program
             var exactly = plan.Replacements.Single();
             var grant = new ReplacementConsent(mode == "origin" ? "http://127.0.0.1:1" : exactly.Origin,
                 mode == "generation" ? Sha("old generation") : exactly.Generation, mode == "mod" ? Id + 1 : Id,
-                mode == "path" ? First.ToUpperInvariant() : First, mode == "prior" ? Sha("wrong prior") : exactly.PriorSha256,
-                mode == "next" ? Sha("wrong next") : exactly.NextSha256);
+                mode == "path" ? First.ToUpperInvariant() : First, mode == "prior" ? Sha("wrong prior") : exactly.PriorXxh3_128,
+                mode == "next" ? Sha("wrong next") : exactly.NextXxh3_128);
             var progress = new SyncProgress();
             using var cancel = new CancellationTokenSource();
             var cancelled = mode.StartsWith("cancel", StringComparison.Ordinal);
@@ -1875,15 +2087,15 @@ internal static class Program
             if (matching) { Write(item, "abc"); Write(empty, ""); }
             var result = Run();
             Check(result == (matching ? SyncResult.UpToDate : SyncResult.RestartRequired), "wrong live result: " + result);
-            foreach (var expected in new[] { (Path: item, Bytes: "abc", Sha: Abc, Xxh: "78af5f94892f3950"),
-                (Path: empty, Bytes: "", Sha: Empty, Xxh: "2d06800538d394c2") })
+            foreach (var expected in new[] { (Path: item, Bytes: "abc", Hash: Abc),
+                (Path: empty, Bytes: "", Hash: Empty) })
             {
                 var actual = ReadIfPresent(expected.Path);
-                Check(actual == expected.Bytes && Sha(actual!) == expected.Sha && Hash(actual!) == expected.Xxh, "live object bytes/checksum mismatch");
+                Check(actual == expected.Bytes && Hash(actual!) == expected.Hash, "live object bytes/checksum mismatch");
                 var entry = ConvoyState.Load().Mods.Single().Files.Single(f => f.Path == expected.Path);
-                Check(entry.Owned == !matching && entry.Hash == expected.Xxh && entry.Sha256 == expected.Sha && entry.Length == expected.Bytes.Length,
+                Check(entry.Owned == !matching && entry.Hash == expected.Hash && entry.Sha256 == null && entry.Length == expected.Bytes.Length,
                     "live object state identity/ownership mismatch");
-                Console.WriteLine($"LIVE {expected.Path} length={entry.Length} sha256={entry.Sha256} xxh3={entry.Hash} owned={entry.Owned}");
+                Console.WriteLine($"LIVE {expected.Path} length={entry.Length} xxh3_128={entry.Hash} owned={entry.Owned}");
             }
             Check(Plan().Updates.Count == 0, "live follow-up was not a no-op");
         }
@@ -1903,7 +2115,7 @@ internal static class Program
 
     private sealed class DownloadFixture : IDisposable
     {
-        private const string Prefix = "/quma/convoy/v2/";
+        private const string Prefix = "/quma/convoy/v3/";
         private readonly HttpListener _listener = new HttpListener();
         private readonly Thread _worker;
         private readonly List<Task> _handlers = new List<Task>();
@@ -1945,7 +2157,7 @@ internal static class Program
             guid = (string?)null, name = "Fixture", version = mod.Version,
             files = mod.Assets.Where(a => !a.Path.StartsWith("SPT_Runtime/user/cache/bundles/")).Select(Describe),
             bundles = mod.Assets.Where(a => a.Path.StartsWith("SPT_Runtime/user/cache/bundles/")).Select(Describe) });
-        private static object Describe((string Path, string Bytes) a) => new { path = a.Path, length = Encoding.UTF8.GetByteCount(a.Bytes), sha256 = Sha(a.Bytes), xxh3_64 = Hash(a.Bytes) };
+        private static object Describe((string Path, string Bytes) a) => new { path = a.Path, length = Encoding.UTF8.GetByteCount(a.Bytes), xxh3_128 = Hash(a.Bytes) };
 
         public void Publish(params ManifestMod[] mods)
         {
@@ -1958,7 +2170,7 @@ internal static class Program
             _large = false;
             _objects = mods.SelectMany(m => m.Assets).GroupBy(a => Sha(a.Bytes)).ToDictionary(g => g.Key, g => Encoding.UTF8.GetBytes(g.First().Bytes));
             _generation = Sha(Guid.NewGuid().ToString("N"));
-            _doc = JObject.FromObject(new { protocol = 2, generation = _generation, spt_version = "4.1.6", quartermaster_version = "fixture",
+            _doc = JObject.FromObject(new { protocol = 3, generation = _generation, spt_version = "4.1.6", quartermaster_version = "fixture",
                 groups = mods.GroupBy(m => m.Optional).Select(group => new { slug = group.Key ? "optional" : "default", name = "Fixture", tier = group.Key ? "optional" : "required", mods = group.Select(ModJson) }),
                 exclusions = Array.Empty<string>() });
             _json = _doc.ToString(Formatting.None);
@@ -1967,11 +2179,8 @@ internal static class Program
         public void PublishLarge()
         {
             Publish(new ManifestMod { Id = Id }.Add(First, "abc"));
-            var xxh = new XxHash3();
-            var block = new byte[64 * 1024];
-            for (var offset = 0; offset < LargeLength; offset += block.Length) xxh.Append(block);
             Edit((doc, _) => doc["groups"]![0]!["mods"]![0]!["files"]![0] = JObject.FromObject(new
-            { path = First, length = LargeLength, sha256 = LargeDigest, xxh3_64 = xxh.GetCurrentHashAsUInt64().ToString("x16") }), null);
+            { path = First, length = LargeLength, xxh3_128 = LargeDigest }), null);
             _large = true;
         }
 

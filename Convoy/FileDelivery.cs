@@ -5,7 +5,7 @@ using System.Globalization;
 using Newtonsoft.Json.Linq;
 using System.IO.Hashing;
 using System.Net;
-using System.Security.Cryptography;
+
 using System.Text;
 using System.Threading;
 
@@ -13,7 +13,7 @@ namespace Convoy
 {
     internal sealed class FileDelivery
     {
-        private const string CatalogPath = "/quma/convoy/v2/catalog";
+        private const string CatalogPath = "/quma/convoy/v3/catalog";
         private const int BufferSize = 64 * 1024;
         private const int MaxManifestChars = 32 * 1024 * 1024;
 
@@ -94,7 +94,7 @@ namespace Convoy
 
         internal bool IsCurrent(Uri origin, string generation, SyncProgress? progress, CancellationToken cancel,
             ManifestBudget? budget = null, int? initialDelay = null) =>
-            DeliveryManifest.Hex(generation, 64) && Manifest(origin, DeliveryManifest.Tag(generation), progress, cancel, budget, initialDelay) != null;
+            DeliveryManifest.Hex(generation, 32) && Manifest(origin, DeliveryManifest.Tag(generation), progress, cancel, budget, initialDelay) != null;
 
         private sealed class ManifestResponse
         {
@@ -156,7 +156,7 @@ namespace Convoy
             {
                 using var response = Open(request);
                 if (tag == null && ((int)response.StatusCode == 404 || (int)response.StatusCode == 410 || (int)response.StatusCode == 303))
-                    throw new IOException("Convoy v2 is unavailable on this server. Upgrade Quartermaster and install the standalone Convoy client with the game closed: https://github.com/cebarks/convoy#installation");
+                    throw new IOException("Convoy v3 is unavailable on this server. Upgrade Quartermaster and install the standalone Convoy client with the game closed: https://github.com/cebarks/convoy#installation");
                 CheckStatus(response);
                 deadline.Token.ThrowIfCancellationRequested();
                 if (tag != null)
@@ -242,7 +242,7 @@ namespace Convoy
         internal string Stage(Uri origin, string generation, DeliveryAsset asset, TransferSpool spool, SyncProgress? progress,
             CancellationToken cancel, ManifestBudget manifestBudget, string connectionGroup, PreparedInstall? prepared)
         {
-            if (spool.Origin != origin || !DeliveryManifest.Hex(generation, 64) || !DeliveryManifest.Hex(asset.Sha256, 64))
+            if (spool.Origin != origin || !DeliveryManifest.Hex(generation, 32) || !DeliveryManifest.Hex(asset.Xxh3_128, 32))
                 throw new InvalidDataException("Invalid Convoy object address");
             var initialCacheBytes = spool.OpenPartial(asset).Length;
             for (var attempt = 0; ; attempt++)
@@ -251,7 +251,7 @@ namespace Convoy
                 try { return StageOnce(origin, generation, asset, spool, progress, cancel, connectionGroup, prepared, ref initialCacheBytes); }
                 catch (Exception ex)
                 {
-                    progress?.ResetAttempt(asset.Sha256);
+                    progress?.ResetAttempt(asset.Xxh3_128);
                     cancel.ThrowIfCancellationRequested();
                     if (ex is DeliveryFailure preparing && preparing.Code == "preparing")
                     {
@@ -279,7 +279,7 @@ namespace Convoy
                 progress?.SetPhase("Verifying");
                 if (VerifyStaged(asset, spool, prepared, cancel))
                 {
-                    progress?.Accept(asset.Sha256, initialCacheBytes, asset.Length - initialCacheBytes);
+                    progress?.Accept(asset.Xxh3_128, initialCacheBytes, asset.Length - initialCacheBytes);
                     return partial.Path;
                 }
                 initialCacheBytes = 0;
@@ -287,7 +287,7 @@ namespace Convoy
                 throw new DeliveryFailure("cached object checksum mismatch: " + asset.Path, transient: true);
             }
 
-            var request = Request(origin, $"/quma/convoy/v2/generations/{generation}/objects/{asset.Sha256}");
+            var request = Request(origin, $"/quma/convoy/v3/generations/{generation}/objects/{asset.Xxh3_128}");
             request.ConnectionGroupName = connectionGroup;
             request.Timeout = 30_000;
             if (reused > 0)
@@ -310,14 +310,14 @@ namespace Convoy
             if (append && reused == 0) throw new InvalidDataException("Unsolicited Convoy object range");
             if (!append) reused = 0;
             var range = append ? FormattableString.Invariant($"bytes {reused}-{asset.Length - 1}/{asset.Length}") : null;
-            var tag = DeliveryManifest.Tag(asset.Sha256);
+            var tag = DeliveryManifest.Tag(asset.Xxh3_128);
             if (response.Headers[HttpResponseHeader.ETag] != tag
                 || response.ContentLength != asset.Length - reused || response.Headers[HttpResponseHeader.ContentRange] != range
                 || response.Headers[HttpResponseHeader.TransferEncoding] != null || response.Headers[HttpResponseHeader.AcceptRanges] != "bytes")
                 throw new InvalidDataException("Invalid Convoy object metadata: " + asset.Path);
 
             if (!append) initialCacheBytes = 0;
-            progress?.StartObject(asset.Sha256, initialCacheBytes, reused - initialCacheBytes);
+            progress?.StartObject(asset.Xxh3_128, initialCacheBytes, reused - initialCacheBytes);
             using var stream = response.GetResponseStream();
             long length = reused;
             var checkpoint = false;
@@ -335,7 +335,7 @@ namespace Convoy
                     catch (IOException ex) { throw new EndOfStreamException("Interrupted Convoy object: " + asset.Path, ex); }
                     if (count == 0) throw new EndOfStreamException("Truncated Convoy object: " + asset.Path);
                     file.Write(buffer, 0, count);
-                    progress?.Receive(asset.Sha256, count);
+                    progress?.Receive(asset.Xxh3_128, count);
                     length += count;
                 }
             }
@@ -353,7 +353,7 @@ namespace Convoy
                 throw new DeliveryFailure("object checksum mismatch: " + asset.Path, transient: true);
             }
             spool.MarkVerified(asset);
-            progress?.Accept(asset.Sha256, initialCacheBytes, asset.Length - initialCacheBytes);
+            progress?.Accept(asset.Xxh3_128, initialCacheBytes, asset.Length - initialCacheBytes);
             return partial.Path;
         }
 
@@ -383,8 +383,7 @@ namespace Convoy
             Action<byte[], int>? write = null, long maxLength = long.MaxValue)
         {
             var buffer = new byte[BufferSize];
-            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var xxh = new XxHash3();
+            var xxh = new XxHash128();
             long total = 0;
             cancel.ThrowIfCancellationRequested();
             int count;
@@ -394,12 +393,11 @@ namespace Convoy
                 if (count > maxLength - total) return null;
                 total += count;
                 write?.Invoke(buffer, count);
-                sha.AppendData(buffer, 0, count);
                 xxh.Append(buffer.AsSpan(0, count));
                 onChunk?.Invoke(path);
                 cancel.ThrowIfCancellationRequested();
             }
-            return new DeliveryAsset(path, total, BitConverter.ToString(sha.GetHashAndReset()).Replace("-", "").ToLowerInvariant(), xxh.GetCurrentHashAsUInt64().ToString("x16"));
+            return new DeliveryAsset(path, total, Hash128.Canonical(xxh));
         }
     }
 }
