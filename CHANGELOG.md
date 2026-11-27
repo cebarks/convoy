@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.8.1] - 2026-11-27
+
 ### Changed
 
 - Automatically accept currently installed legacy files as the new checksum baseline, retaining historical hashes and ownership. Remove per-file legacy review and its sync-blocking approval gate; ordinary mod-level confirmation, config preservation and download verification remain.

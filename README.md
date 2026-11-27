@@ -36,7 +36,7 @@ Before cutover, preserve the previous binaries, server config and compatible dat
 
 ## Installation
 
-Close the game. Install the standalone [Convoy v0.8.0 package](https://github.com/cebarks/convoy/releases/tag/v0.8.0) with [Quartermaster v0.6.0](https://github.com/cebarks/quartermaster/releases/tag/v0.6.0). For a local source build with `DeployAfterBuild=false`, the two inputs are `Convoy/bin/Release/Convoy.dll` and `Convoy/bin/Release/System.IO.Hashing.dll`, placed at `BepInEx/plugins/Convoy/Convoy.dll` and `BepInEx/plugins/Convoy/System.IO.Hashing.dll` in the package. Do not include game assemblies or regression artifacts. The project derives the plugin version from Git tags.
+Close the game. Install the standalone [Convoy v0.8.1 package](https://github.com/cebarks/convoy/releases/tag/v0.8.1) with [Quartermaster v0.6.0](https://github.com/cebarks/quartermaster/releases/tag/v0.6.0). For a local source build with `DeployAfterBuild=false`, the two inputs are `Convoy/bin/Release/Convoy.dll` and `Convoy/bin/Release/System.IO.Hashing.dll`, placed at `BepInEx/plugins/Convoy/Convoy.dll` and `BepInEx/plugins/Convoy/System.IO.Hashing.dll` in the package. Do not include game assemblies or regression artifacts. The project derives the plugin version from Git tags.
 
 Convoy uses the active SPT server origin. Keep existing client configuration. Allow room for private transfer staging and temporary apply/rollback copies. Retry/relaunch after an interruption; a verified completed object is not fetched again. Let the server finish initial publication, and ask the administrator to rehash and republish following out-of-band content edits.
 
