@@ -75,6 +75,24 @@ namespace Convoy
             return true;
         }
 
+        // Only the short baseline state commit is non-cancellable; planning resumes afterward.
+        internal void CommitLegacyBaseline(Action commit, CancellationToken cancel = default)
+        {
+            bool canCancel;
+            lock (_gate)
+            {
+                cancel.ThrowIfCancellationRequested();
+                if (_cancelRequested) throw new OperationCanceledException(Token);
+                canCancel = _view.CanCancel;
+                _view.CanCancel = false;
+            }
+            try { commit(); }
+            finally
+            {
+                lock (_gate) _view.CanCancel = canCancel && !_view.Result.HasValue && !_cancelRequested;
+            }
+        }
+
         internal void BeginApply(CancellationToken cancel = default)
         {
             lock (_gate)

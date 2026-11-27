@@ -97,28 +97,43 @@ internal static class Program
             ("v2 matching install downloads nothing", g => g.Install(true, true)),
             ("v2 mostly matching install downloads only missing asset", g => g.Install(true, false)),
             ("v2 ordinary no-op", g => g.NoOp()),
-            ("v3 matching legacy approval retains owned evidence", g => g.LegacyMatching(true)),
-            ("v3 matching legacy approval retains unowned evidence", g => g.LegacyMatching(false)),
-            ("v3 changed legacy approval preserves state", g => g.LegacyBlocked("changed")),
-            ("v3 declined legacy approval preserves state", g => g.LegacyBlocked("declined")),
-            ("v3 missing legacy file stays pending", g => g.LegacyBlocked("missing")),
-            ("v3 removed legacy mod stays pending", g => g.LegacyBlocked("removed")),
-            ("v3 differing legacy file stays pending", g => g.LegacyBlocked("different")),
-            ("v3 owned legacy differing replacement requires backup", g => g.LegacyDifferent(true, false)),
-            ("v3 unowned legacy differing replacement requires backup", g => g.LegacyDifferent(false, false)),
-            ("v3 legacy differing replacement rollback", g => g.LegacyDifferent(true, true)),
-            ("v3 shared legacy file requires all owners", g => g.LegacyShared()),
-            ("v3 excluded legacy file stays pending", g => g.LegacyBlocked("excluded")),
-            ("v3 late legacy edit preserves state", g => g.LegacyBlocked("final-edit")),
-            ("v3 injected legacy pre-save failure preserves state", g => g.LegacyBlocked("state-io")),
+            ("startup scan reports progress for thousands of files", g => g.PlanningScan(false)),
+            ("startup scan cancellation stops before mutation", g => g.PlanningScan(true)),
+            ("startup scan rejects exact plus case alias", g => g.PlanningAlias(false)),
+            ("execution rejects case alias added after planning", g => g.PlanningAlias(true)),
+            ("v3 legacy commit rejects cancellation inside commit", g => g.LegacyCommitCancellation("inside")),
+            ("v3 legacy commit honors prior cancellation", g => g.LegacyCommitCancellation("prior")),
+            ("v3 legacy commit restores planning cancellation", g => g.LegacyCommitCancellation("after")),
+            ("v3 legacy commit restores cancellation after failure", g => g.LegacyCommitCancellation("failure")),
+            ("v3 automatic legacy baseline retains owned evidence", g => g.AutomaticLegacy(true)),
+            ("v3 automatic legacy baseline retains unowned evidence", g => g.AutomaticLegacy(false)),
+            ("v3 automatic legacy baseline accepts differing current bytes", g => g.AutomaticLegacy(true, "different")),
+            ("v3 automatic legacy baseline accepts missing files", g => g.AutomaticLegacy(true, "missing")),
+            ("v3 automatic legacy baseline accepts excluded files", g => g.AutomaticLegacy(true, "excluded")),
+            ("v3 automatic legacy baseline accepts removed mods", g => g.AutomaticLegacy(true, "removed")),
+            ("v3 automatic legacy baseline accepts disabled mods", g => g.AutomaticLegacy(true, "disabled")),
+            ("v3 automatic legacy baseline accepts skipped mods", g => g.AutomaticLegacy(true, "skipped")),
+            ("v3 automatic legacy baseline handles shared paths", g => g.AutomaticLegacy(true, "shared")),
+            ("v3 automatic legacy baseline rejects late file edit", g => g.AutomaticLegacyFailure("file")),
+            ("v3 automatic legacy baseline rejects changed state", g => g.AutomaticLegacyFailure("state")),
+            ("v3 automatic legacy baseline rejects changed origin", g => g.AutomaticLegacyFailure("origin")),
+            ("v3 automatic legacy baseline state failure preserves evidence", g => g.AutomaticLegacyFailure("io")),
+            ("v3 automatic legacy baseline cancellation preserves evidence", g => g.AutomaticLegacyFailure("cancel")),
+            ("v3 automatic legacy baseline publisher change preserves evidence", g => g.AutomaticLegacyFailure("publisher-change")),
+            ("v3 automatic legacy baseline publisher failure preserves evidence", g => g.AutomaticLegacyFailure("publisher-failure")),
+            ("v3 automatic legacy missing file is restored by ordinary sync", g => g.LegacyOrdinary("missing")),
+            ("v3 automatic legacy differing owned bytes accept ordinary update", g => g.LegacyOrdinary("owned")),
+            ("v3 automatic legacy differing unowned bytes remain protected", g => g.LegacyOrdinary("unowned")),
+            ("v3 automatic legacy null ownership preserves BepInEx semantics", g => g.LegacyOrdinary("null-plugin")),
+            ("v3 automatic legacy null ownership preserves Managed semantics", g => g.LegacyOrdinary("null-managed")),
+            ("v3 automatic legacy migration works through fresh repair", g => g.LegacyOrdinary("repair")),
+            ("v3 excluded legacy config does not block ordinary sync", g => g.LegacyProtectedConfig("excluded")),
+            ("v3 disabled legacy config does not block ordinary sync", g => g.LegacyProtectedConfig("disabled")),
+            ("v3 skipped legacy config does not block ordinary sync", g => g.LegacyProtectedConfig("skipped")),
+            ("v3 removed legacy config does not block ordinary sync", g => g.LegacyProtectedConfig("removed")),
             ("v3 legacy config evidence survives normal sync", g => g.LegacyConfig(false)),
             ("v3 removed config evidence survives mod update", g => g.LegacyConfig(true)),
-            ("v3 removed mod retains pending legacy config", g => g.LegacyRemovedConfig(false)),
-            ("v3 disabled optional mod retains pending legacy config", g => g.LegacyRemovedConfig(true)),
-            ("v3 disabled matching legacy DLL cannot be approved or removed", g => g.LegacyUnselected(false, false)),
-            ("v3 disabled differing legacy DLL cannot be replaced", g => g.LegacyUnselected(false, true)),
-            ("v3 skipped matching legacy DLL cannot be approved", g => g.LegacyUnselected(true, false)),
-            ("v3 skipped differing legacy DLL cannot be replaced", g => g.LegacyUnselected(true, true)),
+
             ("v2 state authority changed after planning", g => g.StaleState(false)),
             ("v2 absent state appeared after planning", g => g.StaleState(true)),
             ("v2 state changes during publication check abort", g => g.ConditionalState(false)),
@@ -334,57 +349,215 @@ internal static class Program
             plan.Installs.Concat(plan.Updates).Select(m => m.Id).Except(decline).ToList(), new HashSet<long>(decline), Array.Empty<ReplacementConsent>());
         private SyncResult Run() => Run(Plan());
 
-        public void LegacyMatching(bool owned)
+        public void PlanningScan(bool cancel)
+        {
+            var mod = Required();
+            for (var i = 0; i < 3000; i++)
+            {
+                var path = "BepInEx/plugins/fixture/file-" + i + ".dll";
+                mod.Add(path, "abc");
+                Write(path, "abc");
+            }
+            _server.Publish(mod);
+            var progress = new SyncProgress();
+            if (cancel) SetObserver(progress, "BeforeLocalObservation", (Action<string>)(_ => progress.TryCancel()));
+            var clock = Stopwatch.StartNew();
+            var cancelled = false;
+            try { _engine.PlanSync(progress); }
+            catch (OperationCanceledException) { cancelled = true; }
+            Console.WriteLine($"startup scan: 3000 sibling files in {clock.Elapsed.TotalSeconds:F3}s, cancelled={cancelled}");
+            if (cancel) Check(cancelled, "startup scan ignored cancellation");
+            else Check(progress.Snapshot().Expected > 0 && progress.Snapshot().Scanned == progress.Snapshot().Expected,
+                "startup scan never reported completed progress");
+            Check(ReadState() == OriginalState && ReadIfPresent(First) == null, "planning mutated files or state");
+            _server.ExpectObjects();
+        }
+
+        public void PlanningAlias(bool late)
+        {
+            _server.Publish(Required());
+            Write(First, "abc");
+            var plan = late ? Plan() : null;
+            Write("BepInEx/plugins/fixture/NEW.dll", "alias");
+            if (late) Check(Run(plan!) == SyncResult.Failed, "cached planning paths authorized a new case alias");
+            else RejectedPlan();
+            Check(ReadIfPresent(First) == "abc" && ReadIfPresent("BepInEx/plugins/fixture/NEW.dll") == "alias"
+                && ReadState() == OriginalState, "alias rejection mutated bytes/state");
+            _server.ExpectObjects();
+        }
+
+        public void LegacyCommitCancellation(string mode)
+        {
+            var progress = new SyncProgress();
+            var commit = typeof(SyncProgress).GetMethod("CommitLegacyBaseline", BindingFlags.NonPublic | BindingFlags.Instance);
+            Check(commit != null, "missing atomic legacy commit cancellation gate");
+            var called = false;
+            if (mode == "prior") Check(progress.TryCancel(), "prior cancellation rejected");
+            Action save = () =>
+            {
+                called = true;
+                Check(!progress.Snapshot().CanCancel && !progress.TryCancel(), "cancellation accepted inside commit");
+                if (mode == "failure") throw new IOException("injected commit failure");
+            };
+            Exception? error = null;
+            try { commit!.Invoke(progress, new object[] { save, CancellationToken.None }); }
+            catch (TargetInvocationException ex) { error = ex.InnerException; }
+            Check(called == (mode != "prior"), "cancelled commit ran its save action");
+            Check(mode == "prior" ? error is OperationCanceledException
+                : mode == "failure" ? error is IOException : error == null, "unexpected commit error: " + error);
+            if (mode != "prior")
+                Check(progress.Snapshot().CanCancel && progress.TryCancel(), "planning cancellation not restored after commit");
+        }
+
+        public void AutomaticLegacy(bool owned, string mode = "matching")
+        {
+            var mod = mode == "disabled" || mode == "skipped" ? Optional(Id).Add(First, "abc") : Required();
+            _server.Publish(mode == "removed" ? new ManifestMod { Id = Id + 1 }.Add(Second, "abc") : mod);
+            if (mode == "excluded") _server.Edit((doc, _) => doc["exclusions"] = new JArray(First), null);
+            var bytes = mode == "different" ? "local edit" : "abc";
+            if (mode != "missing") Write(First, bytes);
+            _state.Mods.Single().Files.Clear();
+            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = owned,
+                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
+            if (mode == "disabled") _state.EnabledGroups.Clear();
+            if (mode == "skipped") _state.SkippedMods.Add(Id);
+            if (mode == "shared")
+                _state.Mods.Add(new ModState { Id = Id + 1, Version = "old", Files = {
+                    new ModFileState { Path = First, Owned = owned, Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 } } });
+            _state.Save();
+            var progress = new SyncProgress();
+            var plan = _engine.PlanSync(progress)!;
+            var saved = ConvoyState.Load();
+            Check(saved.Mods.SelectMany(m => m.Files).All(f => f.Owned == owned && f.Sha256 == null
+                && f.Hash == (mode == "missing" ? "" : Hash(bytes))
+                && f.Length == (mode == "missing" ? (long?)null : Encoding.UTF8.GetByteCount(bytes))
+                && f.Legacy?.Hash == "0123456789abcdef" && f.Legacy.Sha256 == new string('a', 64)
+                && f.Legacy.Owned == owned), "current bytes were not automatically baselined with prior evidence");
+            Check(ReadIfPresent(First) == (mode == "missing" ? null : bytes)
+                && ReadIfPresent(Unrelated) == "locally owned", "baseline changed live bytes");
+            Check(plan.Installs.Count + plan.Updates.Count + plan.Removals.Count == 0 || progress.Snapshot().CanCancel,
+                "baseline disabled cancellation for subsequent planning");
+            if (plan.Installs.Count + plan.Updates.Count + plan.Removals.Count != 0)
+                Check(progress.TryCancel(), "post-baseline active planning rejected cancellation");
+            var baseline = ReadState();
+            Plan();
+            Check(ReadState() == baseline, "baseline repeated on the next plan");
+            _server.ExpectObjects();
+            if (mode == "matching")
+            {
+                Check(Run(plan) == SyncResult.UpToDate, "ordinary post-baseline sync did not reuse matching bytes");
+                var record = ConvoyState.Load().Mods.Single().Files.Single();
+                Check(record.Owned == owned && record.Legacy?.Hash == "0123456789abcdef", "sync lost ownership/evidence");
+            }
+        }
+
+        public void AutomaticLegacyFailure(string mode)
         {
             _server.Publish(Required());
             Write(First, "abc");
             _state.Mods.Single().Files.Clear();
-            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = owned,
-                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
+            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = true, Hash = "0123456789abcdef" });
             _state.Save();
             var before = ReadState();
-            var plan = Plan();
-            Check(ReadState() == before && ReadIfPresent(First) == "abc", "planning changed legacy evidence");
-            Check(plan.LegacyPending.Count == 1, "missing legacy preview");
-            var pending = plan.LegacyPending.Single();
-            Check(pending.Path == First && pending.ModId == Id && pending.PriorOwned == owned
-                && pending.ObservedXxh3_128 == Abc && pending.DesiredXxh3_128 == Abc, "incorrect legacy preview");
-            Check(_engine.ApproveLegacy(plan, new[] { pending }) == SyncResult.Replan, "matching approval did not replan");
-            var record = ConvoyState.Load().Mods.Single().Files.Single();
-            Check(record.Owned == owned && record.Hash == Abc && record.Sha256 == null
-                && record.Legacy != null && record.Legacy.Hash == "0123456789abcdef"
-                && record.Legacy.Sha256 == new string('a', 64) && record.Legacy.Owned == owned,
-                "approval lost original ownership or evidence");
-            Check(ReadIfPresent(First) == "abc" && ReadIfPresent(Unrelated) == "locally owned", "approval changed live bytes");
-            var next = Plan();
-            Check(Run(next) == SyncResult.UpToDate, "matching post-approval sync unexpectedly modified files");
-            var afterSync = ConvoyState.Load().Mods.Single().Files.Single();
-            Check(afterSync.Owned == owned && afterSync.Legacy != null && afterSync.Legacy.Hash == "0123456789abcdef",
-                "normal sync discarded legacy ownership evidence");
+            var progress = new SyncProgress();
+            SetObserver(progress, "BeforeStateSave", (Action)(() =>
+            {
+                if (mode == "file") Write(First, "late edit");
+                if (mode == "state") { _state.SkippedMods.Add(Id + 9); _state.Save(); }
+                if (mode == "origin") Host("http://127.0.0.1:1");
+                if (mode == "cancel") progress.TryCancel();
+                if (mode == "io") throw new IOException("injected baseline save failure");
+                if (mode == "publisher-change") _server.Publish(Required().Add(Second, "def"));
+                if (mode == "publisher-failure") _server.ConditionalFault = _ => "publish_failed";
+            }));
+            var failed = false;
+            try { _engine.PlanSync(progress); }
+            catch (Exception) { failed = true; }
+            finally { Host(_server.Url); }
+            Check(failed, "unsafe baseline commit succeeded");
+            Check(mode == "state" ? ConvoyState.Load().SkippedMods.Contains(Id + 9) : ReadState() == before,
+                "failed baseline overwrote prior or concurrent state");
+            Check(ReadIfPresent(First) == (mode == "file" ? "late edit" : "abc"), "failed baseline changed live bytes");
+            _server.ExpectObjects();
         }
 
-        public void LegacyBlocked(string mode)
+        public void LegacyOrdinary(string mode)
         {
-            _server.Publish(mode == "removed" ? new ManifestMod { Id = Id + 1 }.Add(Second, "def") : Required());
-            if (mode == "excluded") _server.Edit((doc, _) => doc["exclusions"] = new JArray(First), null);
-            if (mode != "missing") Write(First, mode == "different" ? "user edit" : "abc");
+            var path = mode == "null-managed" ? Managed : First;
+            _server.Publish(new ManifestMod { Id = Id }.Add(path, "abc"));
+            if (mode != "missing") Write(path, "local edit");
+            bool? owned = mode.StartsWith("null-", StringComparison.Ordinal) ? (bool?)null : mode != "unowned";
             _state.Mods.Single().Files.Clear();
-            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = true,
+            _state.Mods.Single().Files.Add(new ModFileState { Path = path, Owned = owned,
                 Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
             _state.Save();
-            var before = ReadState();
-            var plan = Plan();
-            var pending = plan.LegacyPending.Single();
-            if (mode == "changed") Write(First, "edited after preview");
-            var progress = new SyncProgress();
-            if (mode == "final-edit") SetObserver(progress, "BeforeStateSave", (Action)(() => Write(First, "late edit")));
-            if (mode == "state-io") SetObserver(progress, "BeforeStateSave", (Action)(() => throw new IOException("injected state failure")));
-            var grants = mode == "declined" ? Array.Empty<LegacyPendingFile>() : new[] { pending };
-            Check(_engine.ApproveLegacy(plan, grants, progress) == SyncResult.Failed, "unsafe legacy approval succeeded");
-            var expected = mode == "missing" ? null : mode == "changed" ? "edited after preview"
-                : mode == "final-edit" ? "late edit" : mode == "different" ? "user edit" : "abc";
-            Check(ReadState() == before && ReadIfPresent(First) == expected && ReadIfPresent(Unrelated) == "locally owned",
-                "blocked approval changed evidence or live files");
+            SyncResult result;
+            string baseline;
+            if (mode == "repair")
+            {
+                baseline = "";
+                var repair = typeof(SyncEngine).GetMethod("ExecuteFreshRepair", BindingFlags.NonPublic | BindingFlags.Instance)!;
+                result = (SyncResult)repair.Invoke(_engine, new object[] { false, new SyncProgress() })!;
+            }
+            else
+            {
+                var plan = Plan();
+                var accepted = ConvoyState.Load().Mods.Single().Files.Single();
+                Check(accepted.Owned == owned && accepted.Legacy?.Owned == owned
+                    && accepted.Hash == (mode == "missing" ? "" : Hash("local edit")),
+                    "baseline adopted ownership or failed to trust installed bytes");
+                Check(plan.Updates.Count == 1 && plan.Installs.Count == 0, "ordinary mod update was not offered");
+                baseline = ReadState();
+                result = Run(plan);
+            }
+            var protectedBytes = mode == "unowned" || mode == "null-managed";
+            Check(result == (protectedBytes ? SyncResult.Failed : SyncResult.RestartRequired),
+                "unexpected post-baseline sync result: " + result);
+            Check(ReadIfPresent(path) == (protectedBytes ? "local edit" : "abc")
+                && ReadIfPresent(Unrelated) == "locally owned", "sync overwrote protected or unrelated bytes");
+            if (protectedBytes)
+            {
+                Check(ReadState() == baseline, "conflicting unowned file changed baseline state");
+                _server.ExpectObjects();
+            }
+            else
+            {
+                var record = ConvoyState.Load().Mods.Single().Files.Single();
+                Check(record.Hash == Abc && record.Owned != false && record.Legacy?.Hash == "0123456789abcdef"
+                    && record.Legacy.Sha256 == new string('a', 64) && record.Legacy.Owned == owned,
+                    "ordinary update lost original ownership evidence");
+                _server.ExpectObjects(Abc);
+            }
+        }
+
+        public void LegacyProtectedConfig(string mode)
+        {
+            var legacy = mode == "disabled" || mode == "skipped" ? Optional(Id).Add(Config, "defaults")
+                : new ManifestMod { Id = Id }.Add(Config, "defaults");
+            var other = new ManifestMod { Id = Id + 1 }.Add(Second, "abc");
+            _server.Publish(mode == "removed" ? new[] { other } : new[] { legacy, other });
+            if (mode == "excluded") _server.Edit((doc, _) => doc["exclusions"] = new JArray(Config), null);
+            if (mode == "disabled") _state.EnabledGroups.Clear();
+            if (mode == "skipped") _state.SkippedMods.Add(Id);
+            Write(Config, "local preferences");
+            _state.Mods.Single().Files.Clear();
+            _state.Mods.Single().Files.Add(new ModFileState { Path = Config, Owned = true,
+                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 12 });
+            _state.Save();
+            Check(Run() == SyncResult.RestartRequired, "protected config blocked unrelated ordinary install");
+            var retained = ConvoyState.Load().Mods.SingleOrDefault(m => m.Id == Id);
+            Check(ReadIfPresent(Config) == "local preferences" && ReadIfPresent(Second) == "abc"
+                && ReadIfPresent(Unrelated) == "locally owned", "ordinary sync changed protected config bytes");
+            if (mode == "disabled" || mode == "removed")
+                Check(retained == null, "ordinary removal unexpectedly retained disabled or removed mod");
+            else
+            {
+                var record = retained!.Files.Single(f => f.Path == Config);
+                Check(record.Hash == "0123456789abcdef" && record.Sha256 == new string('a', 64)
+                    && record.Length == 12 && record.Owned == true && record.Legacy == null,
+                    "ordinary sync changed retained config evidence");
+            }
+            _server.ExpectObjects(Abc);
         }
 
         public void LegacyConfig(bool removed)
@@ -401,103 +574,6 @@ internal static class Program
             Check(ReadIfPresent(Config) == "local preferences" && record.Owned == true
                 && record.Hash == "0123456789abcdef" && record.Sha256 == new string('a', 64) && record.Length == 12,
                 "normal sync discarded protected config contents or legacy evidence");
-        }
-
-        public void LegacyDifferent(bool owned, bool fail)
-        {
-            _server.Publish(Required());
-            Write(First, "user edit");
-            _state.Mods.Single().Files.Clear();
-            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = owned,
-                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
-            _state.Save();
-            var before = ReadState();
-            var plan = Plan();
-            var item = plan.LegacyPending.Single();
-            var progress = new SyncProgress();
-            if (fail) SetObserver(progress, "BeforeStateSave", (Action)(() => throw new IOException("injected failure after placement")));
-            var result = _engine.ApproveLegacy(plan, new[] { item }, progress, new[] { item });
-            var recovery = Path.Combine(_root, "BepInEx/config/Convoy/recovery");
-            var backups = Directory.Exists(recovery) ? Directory.GetFiles(recovery, "*.dll") : Array.Empty<string>();
-            Check(backups.Length == 1 && File.ReadAllText(backups[0]) == "user edit", "backup did not preserve exact prior bytes");
-            if (fail)
-                Check(result == SyncResult.Failed && ReadIfPresent(First) == "user edit" && ReadState() == before,
-                    "failed state save did not restore original bytes and state");
-            else
-            {
-                var record = ConvoyState.Load().Mods.Single().Files.Single();
-                Check(result == SyncResult.RestartRequired && ReadIfPresent(First) == "abc"
-                    && record.Owned == owned && record.Hash == Abc && record.Legacy?.Owned == owned
-                    && record.Legacy.Hash == "0123456789abcdef", "replacement lost ownership or evidence");
-            }
-            Check(ReadIfPresent(Unrelated) == "locally owned", "replacement changed unrelated bytes");
-        }
-
-        public void LegacyShared()
-        {
-            _server.Publish(Required(), new ManifestMod { Id = Id + 1 }.Add(First, "abc"));
-            Write(First, "abc");
-            _state.Mods.Clear();
-            foreach (var id in new[] { Id, Id + 1 })
-                _state.Mods.Add(new ModState { Id = id, Version = "old", Files = {
-                    new ModFileState { Path = First, Owned = true, Hash = "0123456789abcdef" } } });
-            _state.Save();
-            var before = ReadState();
-            var plan = Plan();
-            Check(plan.LegacyPending.Count == 2, "shared legacy owners not shown");
-            Check(_engine.ApproveLegacy(plan, new[] { plan.LegacyPending[0] }) == SyncResult.Failed
-                && ReadState() == before, "partial shared approval changed state");
-            Check(_engine.ApproveLegacy(plan, plan.LegacyPending) == SyncResult.Replan, "complete shared approval failed");
-            var saved = ConvoyState.Load();
-            Check(saved.Mods.Count == 2 && saved.Mods.All(m => m.Files.Single().Hash == Abc
-                && m.Files.Single().Owned == true && m.Files.Single().Legacy?.Hash == "0123456789abcdef")
-                && ReadIfPresent(First) == "abc", "shared approval lost records or changed bytes");
-        }
-
-        public void LegacyRemovedConfig(bool optional)
-        {
-            _server.Publish(optional ? Optional(Id).Add(Config, "server defaults") :
-                new ManifestMod { Id = Id + 1 }.Add(Second, "def"));
-            Write(Config, "local preferences");
-            _state.Mods.Single().Files.Clear();
-            _state.Mods.Single().Files.Add(new ModFileState { Path = Config, Owned = true,
-                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 12 });
-            if (optional) _state.EnabledGroups.Clear();
-            _state.Save();
-            var before = ReadState();
-            var plan = Plan();
-            Check(plan.LegacyPending.Count == 1, "removed legacy config was not pending");
-            var pending = plan.LegacyPending.Single();
-            Check(pending.ModId == Id && pending.Path == Config && pending.DesiredXxh3_128 == null,
-                "removed config incorrectly eligible for approval");
-            Check(_engine.ApproveLegacy(plan, new[] { pending }) == SyncResult.Failed, "removed config was approved");
-            Check(ReadState() == before && ReadIfPresent(Config) == "local preferences"
-                && ReadIfPresent(Unrelated) == "locally owned", "removed config lost bytes or historical state");
-        }
-
-        public void LegacyUnselected(bool skipped, bool different)
-        {
-            _server.Publish(Optional(Id).Add(First, "abc"));
-            var bytes = different ? "local edit" : "abc";
-            Write(First, bytes);
-            _state.Mods.Single().Files.Clear();
-            _state.Mods.Single().Files.Add(new ModFileState { Path = First, Owned = true,
-                Hash = "0123456789abcdef", Sha256 = new string('a', 64), Length = 3 });
-            if (skipped) _state.SkippedMods.Add(Id);
-            else _state.EnabledGroups.Clear();
-            _state.Save();
-            var before = ReadState();
-            var plan = Plan();
-            var pending = plan.LegacyPending.Single();
-            Check(_engine.ApproveLegacy(plan, new[] { pending }, replacements: different ? new[] { pending } : null)
-                == SyncResult.Failed, "unselected legacy DLL approval succeeded");
-            Check(pending.DesiredXxh3_128 == null && pending.DesiredLength == null,
-                "unselected legacy DLL advertised an eligible desired asset");
-            Check(ReadState() == before && ReadIfPresent(First) == bytes,
-                "unselected legacy approval changed bytes or historical state");
-            Check(Run() == SyncResult.Failed && ReadState() == before && ReadIfPresent(First) == bytes,
-                "subsequent normal sync retired unselected legacy evidence or bytes");
-            _server.ExpectObjects();
         }
 
         public static int Child(string root)

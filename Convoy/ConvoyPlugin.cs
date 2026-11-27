@@ -28,8 +28,6 @@ namespace Convoy
         private Dictionary<long, bool> _modChecked = new Dictionary<long, bool>();
         private Vector2 _scrollPosition;
         private readonly HashSet<ReplacementConsent> _replacementChecked = new HashSet<ReplacementConsent>();
-        private readonly HashSet<LegacyPendingFile> _legacyChecked = new HashSet<LegacyPendingFile>();
-        private readonly HashSet<LegacyPendingFile> _legacyReplaceChecked = new HashSet<LegacyPendingFile>();
         private string? _replacementNotice;
         private const float ReplacementRowHeight = 56f;
 
@@ -95,7 +93,7 @@ namespace Convoy
                 _state = PluginState.Retry;
             }
             else if (plan == null ||
-                     (plan.LegacyPending.Count == 0 && plan.Installs.Count == 0 && plan.Updates.Count == 0 && plan.Removals.Count == 0))
+                     (plan.Installs.Count == 0 && plan.Updates.Count == 0 && plan.Removals.Count == 0))
             {
                 var outcome = new SyncOutcome { Result = SyncResult.UpToDate };
                 if (plan != null)
@@ -242,8 +240,6 @@ namespace Convoy
             _groupCollapsed.Clear();
             _modChecked.Clear();
             _replacementChecked.Clear();
-            _legacyChecked.Clear();
-            _legacyReplaceChecked.Clear();
             _scrollPosition = Vector2.zero;
 
             var slugs = plan.Installs.Concat(plan.Updates)
@@ -319,25 +315,6 @@ namespace Convoy
                 Name = "ConvoyExec",
                 IsBackground = true
             };
-            _execThread.Start();
-            _state = PluginState.Executing;
-        }
-
-        private void StartLegacyApproval()
-        {
-            var plan = _plan!;
-            var selected = _legacyChecked.ToArray();
-            var replacements = _legacyReplaceChecked.ToArray();
-            var engine = _engine!;
-            _repairMode = null;
-            _retry = StartPlanning;
-            var progress = new SyncProgress();
-            _execProgress = progress;
-            _execThread = new Thread(() =>
-            {
-                try { progress.Complete(engine.ApproveLegacy(plan, selected, progress, replacements)); }
-                catch (Exception ex) { progress.Complete(SyncResult.Failed, ex.Message); }
-            }) { Name = "ConvoyLegacyApproval", IsBackground = true };
             _execThread.Start();
             _state = PluginState.Executing;
         }
@@ -530,7 +507,6 @@ namespace Convoy
         private void DrawConfirmation()
         {
             var plan = _plan!;
-            if (plan.LegacyPending.Count != 0) { DrawLegacyConfirmation(plan); return; }
 
             float contentHeight = CalculateContentHeight(plan);
             float titleHeight = 40f;
@@ -654,58 +630,6 @@ namespace Convoy
 
             if (GUI.Button(new Rect(buttonStartX + buttonWidth + buttonSpacing, buttonY, buttonWidth, 32f), "Skip Sync"))
                 OnSkipSync();
-        }
-
-        private void DrawLegacyConfirmation(SyncPlan plan)
-        {
-            const float row = 150f;
-            float height = Math.Min(PanelMaxHeight, 150f + plan.LegacyPending.Count * row);
-            float x = (Screen.width - PanelWidth) / 2f;
-            float y = (Screen.height - height) / 2f;
-            GUI.Box(new Rect(x, y, PanelWidth, height), "", _panelStyle);
-            GUI.Label(new Rect(x, y + Padding, PanelWidth, 30f), "Legacy file review", _titleStyle);
-            var label = new GUIStyle(GUI.skin.label) { wordWrap = true };
-            GUI.Label(new Rect(x + Padding, y + 48f, PanelWidth - 2 * Padding, 40f),
-                "Approval trusts the current bytes as the new baseline. It does not prove the old files were unchanged.", label);
-            var view = new Rect(x + Padding, y + 90f, PanelWidth - 2 * Padding, height - 140f);
-            var width = view.width - 20f;
-            _scrollPosition = GUI.BeginScrollView(view, _scrollPosition, new Rect(0, 0, width, plan.LegacyPending.Count * row));
-            float line = 0;
-            foreach (var file in plan.LegacyPending)
-            {
-                bool matching = file.ObservedXxh3_128 == file.DesiredXxh3_128 && file.ObservedLength == file.DesiredLength;
-                bool replaceable = file.Path.StartsWith("BepInEx/plugins/", StringComparison.Ordinal)
-                    && file.Path.EndsWith(".dll", StringComparison.Ordinal);
-                bool eligible = file.ObservedXxh3_128 != null && file.DesiredXxh3_128 != null && (matching || replaceable);
-                var previous = GUI.enabled;
-                GUI.enabled = previous && eligible;
-                bool selected = GUI.Toggle(new Rect(0, line, width, LineHeight), _legacyChecked.Contains(file),
-                    $"Trust current bytes (mod {file.ModId}, prior owned: {file.PriorOwned?.ToString() ?? "legacy default"})");
-                GUI.enabled = previous;
-                if (selected && eligible) _legacyChecked.Add(file); else _legacyChecked.Remove(file);
-                if (!matching && eligible)
-                {
-                    GUI.enabled = previous && selected;
-                    var replace = GUI.Toggle(new Rect(IndentWidth, line + LineHeight, width - IndentWidth, LineHeight),
-                        _legacyReplaceChecked.Contains(file), "Back up original and replace with catalog file");
-                    GUI.enabled = previous;
-                    if (replace && selected) _legacyReplaceChecked.Add(file); else _legacyReplaceChecked.Remove(file);
-                }
-                else _legacyReplaceChecked.Remove(file);
-                string detail = $"{file.Path}\nCurrent: {file.ObservedXxh3_128 ?? "missing"}\nCatalog: {file.DesiredXxh3_128 ?? "excluded or not published"}";
-                if (!eligible) detail += "\nNot eligible for approval; remains pending.";
-                GUI.Label(new Rect(IndentWidth, line + 2 * LineHeight, width - IndentWidth, row - 2 * LineHeight), detail, label);
-                line += row;
-            }
-            GUI.EndScrollView();
-            var enabled = GUI.enabled;
-            GUI.enabled = enabled && _legacyChecked.Count > 0 && !plan.LegacyPending.Any(p =>
-                (_legacyChecked.Any(g => g.Path == p.Path) && !_legacyChecked.Contains(p))
-                || (_legacyChecked.Contains(p) && (p.ObservedXxh3_128 != p.DesiredXxh3_128 || p.ObservedLength != p.DesiredLength)
-                    && !_legacyReplaceChecked.Contains(p)));
-            if (GUI.Button(new Rect(x + 105f, y + height - 42f, 130f, 32f), "Trust selected")) StartLegacyApproval();
-            GUI.enabled = enabled;
-            if (GUI.Button(new Rect(x + 255f, y + height - 42f, 130f, 32f), "Skip Sync")) OnSkipSync();
         }
 
         private void DrawRestart()

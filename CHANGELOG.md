@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- Automatically accept currently installed legacy files as the new checksum baseline, retaining historical hashes and ownership. Remove per-file legacy review and its sync-blocking approval gate; ordinary mod-level confirmation, config preservation and download verification remain.
+
+### Fixed
+
+- Index directory names within read-only path scans instead of rescanning every sibling for each file, avoiding quadratic startup work for large modpacks. Keep fresh path checks at mutation boundaries and show cancellable installed-file scan progress.
+
 ## [0.8.0] - 2026-11-26
 
 ### Changed
