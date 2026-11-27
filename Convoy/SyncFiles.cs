@@ -22,6 +22,21 @@ namespace Convoy
         private const string RecoveryDirectory = "BepInEx/config/Convoy/recovery";
         private static readonly int LocalReadWorkers = Math.Max(1, Environment.ProcessorCount - 2);
         private readonly List<string> _deletes = new List<string>();
+        private DirectoryCaseIndex? _directoryIndex;
+
+        private sealed class PathScan : IDisposable
+        {
+            private readonly SyncFiles _files;
+            internal PathScan(SyncFiles files)
+            {
+                if (files._directoryIndex != null) throw new InvalidOperationException("Nested path scan");
+                _files = files;
+                files._directoryIndex = new DirectoryCaseIndex();
+            }
+            public void Dispose() => _files._directoryIndex = null;
+        }
+
+        internal IDisposable IndexPaths() => new PathScan(this);
 
         internal static bool Allowed(string path)
         {
@@ -54,11 +69,16 @@ namespace Convoy
         private static bool Owns(ModFileState file) => file.Owned ?? file.Path.StartsWith("BepInEx/", StringComparison.Ordinal);
         internal static bool Configuration(string path) => path.StartsWith("BepInEx/config/", StringComparison.Ordinal);
 
-        internal SyncFiles(string root, IEnumerable<ModState> current)
+        internal SyncFiles(string root, IEnumerable<ModState> current) : this(root, current, default) { }
+
+        internal SyncFiles(string root, IEnumerable<ModState> current, CancellationToken cancel)
         {
             _root = Path.GetFullPath(root);
+            Cancel = cancel;
+            using var scan = IndexPaths();
             foreach (var file in current.SelectMany(m => m.Files))
             {
+                Cancel.ThrowIfCancellationRequested();
                 if (Private(file.Path)) throw new InvalidOperationException("Private path in Convoy install record: " + file.Path);
                 Resolve(file.Path);
                 if (_old.TryGetValue(file.Path, out var prior))
@@ -84,7 +104,12 @@ namespace Convoy
             foreach (var part in path.Split('/'))
             {
                 // Case aliases must also be rejected on case-sensitive hosts used for testing.
-                if (Directory.Exists(cursor))
+                if (_directoryIndex != null)
+                {
+                    if (_directoryIndex.HasAlias(cursor, part, Cancel))
+                        throw new InvalidOperationException("Case alias: " + path);
+                }
+                else if (Directory.Exists(cursor))
                     foreach (var name in Directory.EnumerateFileSystemEntries(cursor))
                         if (string.Equals(Path.GetFileName(name), part, StringComparison.OrdinalIgnoreCase) && Path.GetFileName(name) != part)
                             throw new InvalidOperationException("Case alias: " + path);
@@ -226,6 +251,24 @@ namespace Convoy
             return _observed[path] = Read(path);
         }
 
+        internal void ObserveAll(IEnumerable<string> paths)
+        {
+            using var scan = IndexPaths();
+            var distinct = paths.Distinct(StringComparer.Ordinal).ToArray();
+            Progress?.Expect(distinct.Length);
+            var observations = ReadBatch(distinct.Length, i =>
+            {
+                var actual = Read(distinct[i]);
+                Progress?.Scan();
+                return actual;
+            });
+            for (var i = 0; i < distinct.Length; i++)
+            {
+                observations[i].Error?.Throw();
+                _observed[distinct[i]] = observations[i].Value;
+            }
+        }
+
         private DeliveryAsset? Read(string path)
         {
             Cancel.ThrowIfCancellationRequested();
@@ -270,9 +313,9 @@ namespace Convoy
         internal void Apply(Action<string, Stream> copyStaged, Action saveState) =>
             ApplyWithPrecommit(copyStaged, saveState, () => { }, () => { }, () => { });
 
-        internal void ApplyWithPrecommit(Action<string, Stream> copyStaged, Action saveState,
-            Action requirePublication, Action requireStateAndOrigin, Action requireFinalAdmission, Action<string, string>? placePrepared = null)
+        internal Dictionary<string, (long Length, DateTime Modified, DateTime Created)?> RecheckObserved()
         {
+            using var scan = IndexPaths();
             var originals = _observed.ToArray();
             var rechecked = ReadBatch(originals.Length, i =>
             {
@@ -291,6 +334,13 @@ namespace Convoy
                 rechecked[i].Error?.Throw();
                 identities.Add(originals[i].Key, rechecked[i].Value);
             }
+            return identities;
+        }
+
+        internal void ApplyWithPrecommit(Action<string, Stream> copyStaged, Action saveState,
+            Action requirePublication, Action requireStateAndOrigin, Action requireFinalAdmission, Action<string, string>? placePrepared = null)
+        {
+            var identities = RecheckObserved();
             try
             {
                 if (_recovery.Count != 0) requirePublication();
